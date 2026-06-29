@@ -1,0 +1,12 @@
+{
+  "name": "prudentia",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A local-first investment memo workspace for disciplined decisions and RPG-like investor profiling.",
+  "scripts": {
+    "dev:backend": "cargo run -p prudentia-backend",
+    "test:backend": "cargo test -p prudentia-backend",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build"
+  }
+}

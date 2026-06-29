@@ -1,0 +1,4 @@
+symbol,name,quantity,average cost,currency,account,market,sector,market value,notes
+AAPL,Apple Inc.,12,150.25,USD,Main,US,Technology,2450.00,Core quality watchlist
+MSFT,Microsoft Corp.,8,280.00,USD,Main,US,Technology,3600.00,AI infrastructure exposure
+VTI,Vanguard Total Stock Market ETF,20,210.00,USD,Main,US,Broad Market,5200.00,Portfolio anchor

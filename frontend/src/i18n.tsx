@@ -1,0 +1,381 @@
+import {
+  createContext,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useMemo,
+  useState
+} from "react";
+
+export type Locale = "en" | "zh";
+
+export type TranslationKey = keyof typeof translations.en;
+
+interface I18nContextValue {
+  locale: Locale;
+  languageTag: string;
+  setLocale: (locale: Locale) => void;
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string;
+}
+
+const I18nContext = createContext<I18nContextValue | null>(null);
+const storageKey = "prudentia.locale";
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [locale, setLocaleState] = useState<Locale>(() => initialLocale());
+
+  useEffect(() => {
+    document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
+    window.localStorage.setItem(storageKey, locale);
+  }, [locale]);
+
+  const value = useMemo<I18nContextValue>(() => {
+    const languageTag = locale === "zh" ? "zh-CN" : "en-US";
+
+    return {
+      locale,
+      languageTag,
+      setLocale: setLocaleState,
+      t: (key, values) => interpolate(translations[locale][key] ?? translations.en[key], values)
+    };
+  }, [locale]);
+
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+export function useI18n() {
+  const value = useContext(I18nContext);
+  if (!value) {
+    throw new Error("useI18n must be used inside I18nProvider");
+  }
+  return value;
+}
+
+function initialLocale(): Locale {
+  const stored = window.localStorage.getItem(storageKey);
+  if (stored === "zh" || stored === "en") {
+    return stored;
+  }
+
+  return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+function interpolate(template: string, values: Record<string, string | number> = {}) {
+  return Object.entries(values).reduce(
+    (result, [key, value]) => result.replaceAll(`{${key}}`, String(value)),
+    template
+  );
+}
+
+const translations = {
+  en: {
+    "app.subtitle": "Investment OS",
+    "app.navLabel": "Main navigation",
+    "app.languageLabel": "Language",
+    "app.langEnglish": "EN",
+    "app.langChinese": "中文",
+    "nav.dashboard": "Dashboard",
+    "nav.portfolio": "Portfolio",
+    "nav.memos": "Memos",
+    "nav.system": "System",
+    "nav.profile": "Profile",
+    "nav.settings": "Settings",
+
+    "common.open": "Open",
+    "common.positions": "{count} positions",
+    "common.positionsTracked": "{count} positions tracked",
+    "common.stale": "stale",
+    "common.fresh": "fresh",
+
+    "dashboard.eyebrow": "Local-first investment workspace",
+    "dashboard.title": "Decision cockpit",
+    "dashboard.newMemo": "New memo",
+    "dashboard.portfolioValue": "Portfolio value",
+    "dashboard.unrealizedPl": "Unrealized P/L",
+    "dashboard.costBasis": "Cost basis {value}",
+    "dashboard.profileLevel": "Profile level",
+    "dashboard.level": "Level {level}",
+    "dashboard.xpEarned": "{xp} XP earned",
+    "dashboard.priceFreshness": "Price freshness",
+    "dashboard.staleCount": "{count} stale",
+    "dashboard.refreshFromPortfolio": "Refresh prices from Portfolio",
+    "dashboard.portfolioWeight": "Portfolio weight",
+    "dashboard.noPortfolioTitle": "No portfolio yet",
+    "dashboard.noPortfolioBody": "Import a CSV or Excel export to turn holdings into a visible decision surface.",
+    "dashboard.recentMemos": "Recent memos",
+    "dashboard.noMemosTitle": "No memos yet",
+    "dashboard.noMemosBody": "Capture a thesis, risks, catalysts, and kill criteria before decisions harden.",
+    "dashboard.profileSignals": "Profile signals",
+
+    "portfolio.eyebrow": "Portfolio",
+    "portfolio.title": "Holdings, weight, and price freshness",
+    "portfolio.refreshPrices": "Refresh prices",
+    "portfolio.marketValue": "Market value",
+    "portfolio.costBasis": "Cost basis",
+    "portfolio.stalePrices": "Stale prices",
+    "portfolio.importPositions": "Import positions",
+    "portfolio.chooseFile": "Choose CSV or Excel",
+    "portfolio.selectColumn": "Select column",
+    "portfolio.commitImport": "Commit import",
+    "portfolio.noImportTitle": "No import loaded",
+    "portfolio.noImportBody": "Upload a broker export, map columns once, and let Prudentia compute value, weight, and P/L.",
+    "portfolio.sectorExposure": "Sector exposure",
+    "portfolio.noExposureTitle": "No exposure data",
+    "portfolio.noExposureBody": "Import positions to see allocation by sector.",
+    "portfolio.refreshResult": "Refresh result",
+    "portfolio.refreshedCount": "{count} refreshed",
+    "portfolio.failedCount": "{count} failed",
+    "portfolio.noRefreshTitle": "Prices not refreshed this session",
+    "portfolio.noRefreshBody": "The backend also runs a scheduled refresh using the configured market data provider.",
+    "portfolio.positions": "Positions",
+    "portfolio.tableSymbol": "Symbol",
+    "portfolio.tableName": "Name",
+    "portfolio.tableQty": "Qty",
+    "portfolio.tableAvgCost": "Avg cost",
+    "portfolio.tableLastPrice": "Last price",
+    "portfolio.tableMarketValue": "Market value",
+    "portfolio.tablePl": "P/L",
+    "portfolio.tableWeight": "Weight",
+    "portfolio.tableStatus": "Status",
+    "portfolio.noPositionsTitle": "No positions tracked",
+    "portfolio.noPositionsBody": "Import holdings to connect memos, decisions, and portfolio exposure.",
+    "portfolio.mapSymbol": "Symbol",
+    "portfolio.mapName": "Name",
+    "portfolio.mapQuantity": "Quantity",
+    "portfolio.mapAverageCost": "Average cost",
+    "portfolio.mapCurrency": "Currency",
+    "portfolio.mapAccount": "Account",
+    "portfolio.mapMarket": "Market",
+    "portfolio.mapSector": "Sector",
+    "portfolio.mapImportedMarketValue": "Market value",
+    "portfolio.mapNotes": "Notes",
+
+    "memos.eyebrow": "Memos",
+    "memos.title": "Thesis, risks, catalysts, and kill criteria",
+    "memos.newMemo": "New memo",
+    "memos.fieldTitle": "Title",
+    "memos.titlePlaceholder": "Company or idea",
+    "memos.fieldSymbol": "Symbol",
+    "memos.fieldNotes": "Raw notes",
+    "memos.notesPlaceholder": "Paste observations, numbers, links, questions, or a rough thesis.",
+    "memos.fieldTags": "Tags",
+    "memos.tagsPlaceholder": "quality, compounder",
+    "memos.create": "Create memo",
+    "memos.library": "Memo library",
+    "memos.noMemosTitle": "No memos yet",
+    "memos.noMemosBody": "Start with rough notes; the AI provider can extract a structured memo from them.",
+    "memos.noSymbol": "No symbol",
+    "memos.aiExtract": "AI extract",
+    "memos.notes": "Notes",
+    "memos.noNotes": "No notes yet",
+    "memos.thesis": "Thesis",
+    "memos.risks": "Risks",
+    "memos.catalysts": "Catalysts",
+    "memos.disconfirmingEvidence": "Disconfirming evidence",
+    "memos.aiChecklist": "AI checklist",
+
+    "system.eyebrow": "Investment system",
+    "system.title": "Principles, checklist, competence, rules",
+    "system.aiRefine": "AI refine",
+    "system.principles": "Principles",
+    "system.checklist": "Checklist",
+    "system.circle": "Circle of competence",
+    "system.decisionRules": "Decision rules",
+    "system.save": "Save system",
+    "system.aiRefinement": "AI refinement",
+
+    "profile.eyebrow": "Investor profile",
+    "profile.title": "RPG-like feedback from your process",
+    "profile.level": "Level",
+    "profile.xp": "XP",
+    "profile.nextLevel": "Next level at {xp}",
+    "profile.badges": "Badges",
+    "profile.biasSignals": "Bias signals",
+    "profile.attributes": "Attributes",
+    "profile.noBadgesTitle": "No badges yet",
+    "profile.noBadgesBody": "Create memos, import positions, and record reviewable decisions to unlock feedback.",
+    "profile.noSignalsTitle": "No active signals",
+    "profile.noSignalsBody": "Current rule checks are not flagging a process risk.",
+    "profile.ruleEvents": "Rule events",
+
+    "settings.eyebrow": "Settings",
+    "settings.title": "AI provider and credential setup",
+    "settings.provider": "Provider",
+    "settings.providerMock": "Mock",
+    "settings.providerOpenai": "OpenAI-compatible",
+    "settings.providerCli": "CLI provider",
+    "settings.cliProvider": "CLI provider",
+    "settings.cliProviderCodex": "Codex CLI device login",
+    "settings.openaiBaseUrl": "OpenAI-compatible base URL",
+    "settings.openaiModel": "OpenAI-compatible model",
+    "settings.openaiApiKey": "API key",
+    "settings.openaiApiKeyPlaceholder": "Leave blank to keep current key",
+    "settings.keyConfigured": "A key is currently configured.",
+    "settings.keyMissing": "No API key is configured.",
+    "settings.cliPath": "CLI path",
+    "settings.cliModel": "CLI model override",
+    "settings.cliProfile": "CLI profile",
+    "settings.cliLoginCommand": "CLI login command",
+    "settings.cliHelp": "For Codex, run this in a terminal once, finish the browser/device-code flow, then choose CLI as the provider.",
+    "settings.persist": "Write these settings to .env",
+    "settings.save": "Save AI settings",
+    "settings.saved": "Settings saved",
+    "settings.envNote": "Runtime settings take effect immediately. Writing .env makes them survive a backend restart.",
+    "settings.mockNote": "Mock mode stays fully local and deterministic.",
+  },
+  zh: {
+    "app.subtitle": "投资操作系统",
+    "app.navLabel": "主导航",
+    "app.languageLabel": "语言",
+    "app.langEnglish": "EN",
+    "app.langChinese": "中文",
+    "nav.dashboard": "总览",
+    "nav.portfolio": "组合",
+    "nav.memos": "备忘录",
+    "nav.system": "投资体系",
+    "nav.profile": "画像",
+    "nav.settings": "设置",
+
+    "common.open": "打开",
+    "common.positions": "{count} 个持仓",
+    "common.positionsTracked": "已跟踪 {count} 个持仓",
+    "common.stale": "待刷新",
+    "common.fresh": "已更新",
+
+    "dashboard.eyebrow": "本地优先的投资工作台",
+    "dashboard.title": "决策驾驶舱",
+    "dashboard.newMemo": "新建备忘录",
+    "dashboard.portfolioValue": "组合市值",
+    "dashboard.unrealizedPl": "未实现盈亏",
+    "dashboard.costBasis": "成本基准 {value}",
+    "dashboard.profileLevel": "画像等级",
+    "dashboard.level": "{level} 级",
+    "dashboard.xpEarned": "已获得 {xp} XP",
+    "dashboard.priceFreshness": "行情新鲜度",
+    "dashboard.staleCount": "{count} 个待刷新",
+    "dashboard.refreshFromPortfolio": "在组合页刷新价格",
+    "dashboard.portfolioWeight": "组合权重",
+    "dashboard.noPortfolioTitle": "还没有组合数据",
+    "dashboard.noPortfolioBody": "导入 CSV 或 Excel 持仓文件，把持仓变成可见的决策界面。",
+    "dashboard.recentMemos": "最近备忘录",
+    "dashboard.noMemosTitle": "还没有备忘录",
+    "dashboard.noMemosBody": "在决策定型前，先记录 thesis、风险、催化剂和退出条件。",
+    "dashboard.profileSignals": "画像信号",
+
+    "portfolio.eyebrow": "Portfolio",
+    "portfolio.title": "持仓、权重与行情新鲜度",
+    "portfolio.refreshPrices": "刷新价格",
+    "portfolio.marketValue": "市值",
+    "portfolio.costBasis": "成本基准",
+    "portfolio.stalePrices": "待刷新价格",
+    "portfolio.importPositions": "导入持仓",
+    "portfolio.chooseFile": "选择 CSV 或 Excel",
+    "portfolio.selectColumn": "选择列",
+    "portfolio.commitImport": "确认导入",
+    "portfolio.noImportTitle": "尚未载入导入文件",
+    "portfolio.noImportBody": "上传券商导出文件，完成一次字段映射，Prudentia 会计算市值、权重和盈亏。",
+    "portfolio.sectorExposure": "行业暴露",
+    "portfolio.noExposureTitle": "暂无暴露数据",
+    "portfolio.noExposureBody": "导入持仓后查看行业配置。",
+    "portfolio.refreshResult": "刷新结果",
+    "portfolio.refreshedCount": "已刷新 {count} 个",
+    "portfolio.failedCount": "失败 {count} 个",
+    "portfolio.noRefreshTitle": "本次会话尚未刷新价格",
+    "portfolio.noRefreshBody": "后端也会根据配置的行情 provider 定时刷新。",
+    "portfolio.positions": "持仓",
+    "portfolio.tableSymbol": "代码",
+    "portfolio.tableName": "名称",
+    "portfolio.tableQty": "数量",
+    "portfolio.tableAvgCost": "平均成本",
+    "portfolio.tableLastPrice": "最新价",
+    "portfolio.tableMarketValue": "市值",
+    "portfolio.tablePl": "盈亏",
+    "portfolio.tableWeight": "权重",
+    "portfolio.tableStatus": "状态",
+    "portfolio.noPositionsTitle": "还没有跟踪持仓",
+    "portfolio.noPositionsBody": "导入持仓，把备忘录、决策和组合暴露连接起来。",
+    "portfolio.mapSymbol": "代码",
+    "portfolio.mapName": "名称",
+    "portfolio.mapQuantity": "数量",
+    "portfolio.mapAverageCost": "平均成本",
+    "portfolio.mapCurrency": "币种",
+    "portfolio.mapAccount": "账户",
+    "portfolio.mapMarket": "市场",
+    "portfolio.mapSector": "行业",
+    "portfolio.mapImportedMarketValue": "市值",
+    "portfolio.mapNotes": "备注",
+
+    "memos.eyebrow": "备忘录",
+    "memos.title": "Thesis、风险、催化剂和退出条件",
+    "memos.newMemo": "新建备忘录",
+    "memos.fieldTitle": "标题",
+    "memos.titlePlaceholder": "公司或投资想法",
+    "memos.fieldSymbol": "代码",
+    "memos.fieldNotes": "原始笔记",
+    "memos.notesPlaceholder": "粘贴观察、数据、链接、问题或粗略 thesis。",
+    "memos.fieldTags": "标签",
+    "memos.tagsPlaceholder": "质量, 复利",
+    "memos.create": "创建备忘录",
+    "memos.library": "备忘录库",
+    "memos.noMemosTitle": "还没有备忘录",
+    "memos.noMemosBody": "从粗略笔记开始，AI provider 可以提炼出结构化备忘录。",
+    "memos.noSymbol": "无代码",
+    "memos.aiExtract": "AI 提炼",
+    "memos.notes": "笔记",
+    "memos.noNotes": "暂无笔记",
+    "memos.thesis": "Thesis",
+    "memos.risks": "风险",
+    "memos.catalysts": "催化剂",
+    "memos.disconfirmingEvidence": "反证条件",
+    "memos.aiChecklist": "AI 检查清单",
+
+    "system.eyebrow": "投资体系",
+    "system.title": "原则、清单、能力圈、决策规则",
+    "system.aiRefine": "AI 整理",
+    "system.principles": "原则",
+    "system.checklist": "检查清单",
+    "system.circle": "能力圈",
+    "system.decisionRules": "决策规则",
+    "system.save": "保存体系",
+    "system.aiRefinement": "AI 整理结果",
+
+    "profile.eyebrow": "投资画像",
+    "profile.title": "从投资流程沉淀 RPG-like 反馈",
+    "profile.level": "等级",
+    "profile.xp": "XP",
+    "profile.nextLevel": "下一等级需要 {xp}",
+    "profile.badges": "徽章",
+    "profile.biasSignals": "偏差信号",
+    "profile.attributes": "属性",
+    "profile.noBadgesTitle": "还没有徽章",
+    "profile.noBadgesBody": "创建备忘录、导入持仓、记录可复盘决策后会解锁反馈。",
+    "profile.noSignalsTitle": "暂无活跃信号",
+    "profile.noSignalsBody": "当前规则检查没有标记流程风险。",
+    "profile.ruleEvents": "规则事件",
+
+    "settings.eyebrow": "设置",
+    "settings.title": "AI provider 与凭据配置",
+    "settings.provider": "Provider",
+    "settings.providerMock": "Mock",
+    "settings.providerOpenai": "OpenAI-compatible",
+    "settings.providerCli": "CLI provider",
+    "settings.cliProvider": "CLI provider",
+    "settings.cliProviderCodex": "Codex CLI device 登录",
+    "settings.openaiBaseUrl": "OpenAI-compatible Base URL",
+    "settings.openaiModel": "OpenAI-compatible 模型",
+    "settings.openaiApiKey": "API Key",
+    "settings.openaiApiKeyPlaceholder": "留空则保留当前 key",
+    "settings.keyConfigured": "当前已配置 key。",
+    "settings.keyMissing": "尚未配置 API key。",
+    "settings.cliPath": "CLI 路径",
+    "settings.cliModel": "CLI 模型覆盖",
+    "settings.cliProfile": "CLI profile",
+    "settings.cliLoginCommand": "CLI 登录命令",
+    "settings.cliHelp": "如果使用 Codex，先在终端运行一次该命令，完成浏览器/device-code 登录，再选择 CLI provider。",
+    "settings.persist": "写入 .env 持久化",
+    "settings.save": "保存 AI 设置",
+    "settings.saved": "设置已保存",
+    "settings.envNote": "运行时设置会立即生效。写入 .env 后，后端重启仍会保留。",
+    "settings.mockNote": "Mock 模式完全本地、确定性输出。"
+  }
+} as const;
