@@ -104,5 +104,32 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .await?;
 
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS research_records (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            source_type TEXT,
+            source_title TEXT,
+            source_author TEXT,
+            source_content TEXT,
+            symbol TEXT,
+            memo_id TEXT,
+            summary TEXT NOT NULL,
+            insights_json TEXT NOT NULL,
+            risks_json TEXT NOT NULL,
+            checklist_json TEXT NOT NULL,
+            candidate_principles_json TEXT NOT NULL,
+            candidate_checklist_items_json TEXT NOT NULL,
+            raw_output_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(memo_id) REFERENCES memos(id) ON DELETE SET NULL
+        );
+        "#,
+    )
+    .await?;
+
     Ok(())
 }

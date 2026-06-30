@@ -9,6 +9,7 @@ pub mod market_data;
 pub mod memo;
 pub mod portfolio;
 pub mod profile;
+pub mod research;
 pub mod settings;
 pub mod startup;
 pub mod state;
