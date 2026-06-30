@@ -108,7 +108,7 @@ Context:
 {}
 "#,
         language_name(locale),
-        serde_json::to_string_pretty(context).unwrap_or_default()
+        serde_json::to_string_pretty(context).expect("research context serializes")
     )
 }
 
@@ -132,7 +132,7 @@ Context:
 {}
 "#,
         language_name(locale),
-        serde_json::to_string_pretty(context).unwrap_or_default()
+        serde_json::to_string_pretty(context).expect("research context serializes")
     )
 }
 
@@ -153,5 +153,73 @@ fn language_name(locale: Locale) -> &'static str {
         "Simplified Chinese"
     } else {
         "English"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::portfolio::PortfolioSummary;
+
+    #[test]
+    fn stock_snapshot_prompt_contains_trading_instruction_guardrail() {
+        let prompt = stock_snapshot_prompt(
+            &StockSnapshotContext {
+                symbol: "AAPL".to_string(),
+                position: None,
+                portfolio_summary: empty_portfolio_summary(),
+                related_memos: Vec::new(),
+                selected_memo: None,
+                quote: None,
+                quote_error: None,
+            },
+            Locale::En,
+        );
+
+        assert!(prompt.contains("Do not give buy, sell, trim, add, or hold instructions"));
+    }
+
+    #[test]
+    fn portfolio_review_prompt_contains_trading_instruction_guardrail() {
+        let prompt = portfolio_review_prompt(
+            &PortfolioReviewContext {
+                positions: Vec::new(),
+                summary: empty_portfolio_summary(),
+                holdings_without_memo: Vec::new(),
+            },
+            Locale::En,
+        );
+
+        assert!(prompt.contains("Do not give buy, sell, trim, add, or hold instructions"));
+    }
+
+    #[test]
+    fn research_distillation_prompt_contains_external_fact_guardrail() {
+        let prompt = research_distillation_prompt(
+            &ResearchSourceInput {
+                title: "Munger notes".to_string(),
+                source_type: Some("person".to_string()),
+                source_title: Some("Interview notes".to_string()),
+                source_author: Some("Charlie Munger".to_string()),
+                source_content: "Invert before deciding.".to_string(),
+                symbol: None,
+            },
+            Locale::En,
+        );
+
+        assert!(prompt.contains("Do not invent external facts"));
+    }
+
+    fn empty_portfolio_summary() -> PortfolioSummary {
+        PortfolioSummary {
+            total_market_value: 0.0,
+            total_cost: 0.0,
+            total_unrealized_pnl: 0.0,
+            positions_count: 0,
+            price_stale_count: 0,
+            top_positions: Vec::new(),
+            sectors: Vec::new(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
     }
 }

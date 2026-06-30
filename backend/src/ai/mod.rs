@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use crate::research::ResearchAnalysis;
 use crate::{
     config::AppConfig,
     investment_system::InvestmentSystem,
@@ -66,16 +67,6 @@ pub struct InvestmentSystemRefinement {
     pub circle_of_competence: Vec<String>,
     pub decision_rules: Vec<String>,
     pub summary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResearchAnalysis {
-    pub summary: String,
-    pub insights: Vec<String>,
-    pub risks: Vec<String>,
-    pub checklist: Vec<String>,
-    pub candidate_principles: Vec<String>,
-    pub candidate_checklist_items: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

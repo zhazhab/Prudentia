@@ -564,8 +564,64 @@ async fn mock_ai_returns_structured_research_analysis() {
     .expect("mock distillation");
 
     assert!(analysis.summary.contains("Munger notes"));
-    assert!(!analysis.insights.is_empty());
-    assert!(!analysis.candidate_checklist_items.is_empty());
+    assert_research_analysis_arrays_non_empty(&analysis);
+}
+
+#[test]
+fn ai_research_analysis_uses_canonical_research_shape() {
+    let analysis: prudentia_backend::research::ResearchAnalysis =
+        prudentia_backend::ai::ResearchAnalysis {
+            summary: "Summary".to_string(),
+            insights: vec!["Insight".to_string()],
+            risks: vec!["Risk".to_string()],
+            checklist: vec!["Checklist".to_string()],
+            candidate_principles: vec!["Principle".to_string()],
+            candidate_checklist_items: vec!["Checklist item".to_string()],
+        };
+
+    assert_eq!(analysis.summary, "Summary");
+}
+
+#[tokio::test]
+async fn mock_ai_stock_snapshot_returns_structured_research_analysis() {
+    let provider = prudentia_backend::ai::mock::MockAiProvider;
+    let analysis = prudentia_backend::ai::AiProvider::analyze_stock_snapshot(
+        &provider,
+        &prudentia_backend::ai::StockSnapshotContext {
+            symbol: "AAPL".to_string(),
+            position: None,
+            portfolio_summary: empty_portfolio_summary(),
+            related_memos: Vec::new(),
+            selected_memo: None,
+            quote: None,
+            quote_error: None,
+        },
+        Locale::En,
+    )
+    .await
+    .expect("mock stock snapshot");
+
+    assert!(analysis.summary.contains("AAPL"));
+    assert_research_analysis_arrays_non_empty(&analysis);
+}
+
+#[tokio::test]
+async fn mock_ai_portfolio_review_returns_structured_research_analysis() {
+    let provider = prudentia_backend::ai::mock::MockAiProvider;
+    let analysis = prudentia_backend::ai::AiProvider::review_portfolio_risk(
+        &provider,
+        &prudentia_backend::ai::PortfolioReviewContext {
+            positions: vec![sample_position("AAPL"), sample_position("MSFT")],
+            summary: empty_portfolio_summary(),
+            holdings_without_memo: Vec::new(),
+        },
+        Locale::En,
+    )
+    .await
+    .expect("mock portfolio review");
+
+    assert!(analysis.summary.contains('2'));
+    assert_research_analysis_arrays_non_empty(&analysis);
 }
 
 fn research_request(
@@ -591,6 +647,49 @@ fn research_request(
             candidate_principles: vec!["Prefer durable compounding.".to_string()],
             candidate_checklist_items: vec!["What breaks the moat?".to_string()],
         },
+    }
+}
+
+fn assert_research_analysis_arrays_non_empty(analysis: &prudentia_backend::ai::ResearchAnalysis) {
+    assert!(!analysis.insights.is_empty());
+    assert!(!analysis.risks.is_empty());
+    assert!(!analysis.checklist.is_empty());
+    assert!(!analysis.candidate_principles.is_empty());
+    assert!(!analysis.candidate_checklist_items.is_empty());
+}
+
+fn empty_portfolio_summary() -> portfolio::PortfolioSummary {
+    portfolio::PortfolioSummary {
+        total_market_value: 0.0,
+        total_cost: 0.0,
+        total_unrealized_pnl: 0.0,
+        positions_count: 0,
+        price_stale_count: 0,
+        top_positions: Vec::new(),
+        sectors: Vec::new(),
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
+    }
+}
+
+fn sample_position(symbol: &str) -> portfolio::PortfolioPosition {
+    portfolio::PortfolioPosition {
+        symbol: symbol.to_string(),
+        name: symbol.to_string(),
+        asset_type: "stock".to_string(),
+        quantity: 1.0,
+        average_cost: 100.0,
+        currency: "USD".to_string(),
+        account: None,
+        market: None,
+        sector: None,
+        notes: None,
+        last_price: Some(100.0),
+        market_value: 100.0,
+        unrealized_pnl: 0.0,
+        weight: 0.0,
+        price_updated_at: None,
+        price_stale: false,
+        updated_at: "2026-01-01T00:00:00Z".to_string(),
     }
 }
 
