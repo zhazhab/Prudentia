@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{
+    extract::{Path, Query, State},
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use uuid::Uuid;
@@ -126,6 +131,96 @@ pub struct ResearchRecordQuery {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/records", get(list_records_handler))
+        .route("/records/{id}", get(get_record_handler))
+        .route("/records/{id}/adopt", post(adopt_candidates_handler))
+        .route("/distill", post(distill_handler))
+        .route("/stock-snapshot", post(stock_snapshot_handler))
+        .route("/portfolio-review", post(portfolio_review_handler))
+}
+
+async fn list_records_handler(
+    State(state): State<AppState>,
+    Query(params): Query<ResearchRecordListParams>,
+) -> AppResult<Json<Vec<ResearchRecord>>> {
+    let query = ResearchRecordQuery {
+        kind: params
+            .kind
+            .as_deref()
+            .map(|kind| {
+                ResearchRecordKind::parse(kind)
+                    .ok_or_else(|| AppError::bad_request("invalid research record kind"))
+            })
+            .transpose()?,
+        symbol: clean_option(params.symbol),
+        q: clean_option(params.q),
+    };
+    Ok(Json(list_records(&state.pool, query).await?))
+}
+
+async fn get_record_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<ResearchRecord>> {
+    Ok(Json(get_record(&state.pool, &id).await?))
+}
+
+async fn distill_handler(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(request): Json<DistillResearchRequest>,
+) -> AppResult<Json<ResearchRecord>> {
+    Ok(Json(
+        distill(
+            &state.pool,
+            state.ai.clone(),
+            request,
+            Locale::from_headers(&headers),
+        )
+        .await?,
+    ))
+}
+
+async fn stock_snapshot_handler(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(request): Json<StockSnapshotRequest>,
+) -> AppResult<Json<ResearchRecord>> {
+    Ok(Json(
+        analyze_stock_snapshot(
+            &state.pool,
+            state.ai.clone(),
+            state.market_data.clone(),
+            request,
+            Locale::from_headers(&headers),
+        )
+        .await?,
+    ))
+}
+
+async fn portfolio_review_handler(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> AppResult<Json<ResearchRecord>> {
+    Ok(Json(
+        review_portfolio(
+            &state.pool,
+            state.ai.clone(),
+            Locale::from_headers(&headers),
+        )
+        .await?,
+    ))
+}
+
+async fn adopt_candidates_handler(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<AdoptResearchCandidatesRequest>,
+) -> AppResult<Json<InvestmentSystem>> {
+    Ok(Json(
+        adopt_candidates(&state.pool, &id, request, Locale::from_headers(&headers)).await?,
+    ))
 }
 
 pub async fn distill(

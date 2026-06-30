@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use axum::{
+    body::{to_bytes, Body},
+    http::{Request, StatusCode},
+};
 use prudentia_backend::{
     ai::{
         cli::{CliProviderKind, CliSettings},
@@ -12,9 +16,10 @@ use prudentia_backend::{
     market_data::{MarketDataError, MarketDataProvider, MarketQuote},
     memo::{self, CreateMemoRequest},
     portfolio::{self, PortfolioImportCommitRequest, PortfolioImportPreviewRequest},
-    profile, research,
+    profile, research, startup,
 };
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use tower::ServiceExt;
 
 async fn test_pool() -> SqlitePool {
     let pool = SqlitePoolOptions::new()
@@ -255,6 +260,64 @@ async fn research_distillation_workflow_saves_record() {
     assert_eq!(record.kind, research::ResearchRecordKind::Distillation);
     assert_eq!(record.symbol.as_deref(), Some("BRK.B"));
     assert!(!record.candidate_principles.is_empty());
+}
+
+#[tokio::test]
+async fn research_routes_create_and_list_distillations() {
+    let pool = test_pool().await;
+    let ai = Arc::new(AiRuntime::new(
+        AiSettings {
+            provider: AiProviderKind::Mock,
+            openai_api_key: None,
+            openai_base_url: "https://api.openai.com/v1".to_string(),
+            openai_model: "gpt-4.1-mini".to_string(),
+            cli: CliSettings::default(),
+        },
+        ".env",
+    ));
+    let app = startup::build_router(pool, ai, Arc::new(FailingProvider));
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/research/distill")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "title":"Munger notes",
+                      "source_type":"person",
+                      "source_title":"Interview",
+                      "source_author":"Charlie Munger",
+                      "source_content":"Invert before deciding.",
+                      "symbol":"BRK.B"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(create_response.status(), StatusCode::OK);
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/research/records?kind=distillation&symbol=BRK.B&q=munger")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = to_bytes(list_response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let records: Vec<research::ResearchRecord> = serde_json::from_slice(&body).expect("json");
+    assert_eq!(records.len(), 1);
 }
 
 #[tokio::test]
