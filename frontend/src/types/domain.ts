@@ -34,6 +34,48 @@ export interface InvestmentSystemRefinement extends InvestmentSystem {
   summary: string;
 }
 
+export type ResearchRecordKind = "distillation" | "stock_snapshot" | "portfolio_review";
+
+export interface ResearchRecord {
+  id: string;
+  kind: ResearchRecordKind;
+  title: string;
+  source_type?: string | null;
+  source_title?: string | null;
+  source_author?: string | null;
+  source_content?: string | null;
+  symbol?: string | null;
+  memo_id?: string | null;
+  summary: string;
+  insights: string[];
+  risks: string[];
+  checklist: string[];
+  candidate_principles: string[];
+  candidate_checklist_items: string[];
+  raw_output: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DistillResearchRequest {
+  title: string;
+  source_type?: string | null;
+  source_title?: string | null;
+  source_author?: string | null;
+  source_content: string;
+  symbol?: string | null;
+}
+
+export interface StockSnapshotRequest {
+  symbol: string;
+  memo_id?: string | null;
+}
+
+export interface AdoptResearchCandidatesRequest {
+  principles: string[];
+  checklist_items: string[];
+}
+
 export interface PortfolioPosition {
   symbol: string;
   name: string;

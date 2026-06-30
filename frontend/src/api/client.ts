@@ -2,7 +2,9 @@ import type {
   InvestmentSystem,
   InvestmentSystemRefinement,
   InvestorProfile,
+  AdoptResearchCandidatesRequest,
   AiSettings,
+  DistillResearchRequest,
   Memo,
   MemoExtraction,
   PortfolioImportMapping,
@@ -11,6 +13,8 @@ import type {
   PortfolioPosition,
   PortfolioSummary,
   PriceRefreshResult,
+  ResearchRecord,
+  StockSnapshotRequest,
   UpdateAiSettings
 } from "../types/domain";
 
@@ -48,6 +52,17 @@ export interface FilePayload {
   content_encoding?: "base64";
 }
 
+function queryString(params: Record<string, string | undefined>) {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value?.trim()) {
+      search.set(key, value.trim());
+    }
+  });
+  const value = search.toString();
+  return value ? `?${value}` : "";
+}
+
 export const api = {
   memos: () => request<Memo[]>("/api/memos/"),
   createMemo: (payload: Partial<Memo> & { title: string }) =>
@@ -67,6 +82,33 @@ export const api = {
   refineInvestmentSystem: (languageTag?: string) =>
     request<InvestmentSystemRefinement>("/api/investment-system/ai/refine", {
       method: "POST",
+      languageTag
+    }),
+  researchRecords: (params: { kind?: string; symbol?: string; q?: string } = {}) =>
+    request<ResearchRecord[]>(`/api/research/records${queryString(params)}`),
+  researchRecord: (id: string) => request<ResearchRecord>(`/api/research/records/${id}`),
+  distillResearch: (payload: DistillResearchRequest, languageTag?: string) =>
+    request<ResearchRecord>("/api/research/distill", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      languageTag
+    }),
+  stockSnapshot: (payload: StockSnapshotRequest, languageTag?: string) =>
+    request<ResearchRecord>("/api/research/stock-snapshot", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      languageTag
+    }),
+  portfolioReview: (languageTag?: string) =>
+    request<ResearchRecord>("/api/research/portfolio-review", { method: "POST", languageTag }),
+  adoptResearchCandidates: (
+    id: string,
+    payload: AdoptResearchCandidatesRequest,
+    languageTag?: string
+  ) =>
+    request<InvestmentSystem>(`/api/research/records/${id}/adopt`, {
+      method: "POST",
+      body: JSON.stringify(payload),
       languageTag
     }),
   positions: () => request<PortfolioPosition[]>("/api/portfolio/positions"),
