@@ -1,10 +1,17 @@
+use std::sync::Arc;
+
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
+    ai::{runtime::AiRuntime, PortfolioReviewContext, ResearchSourceInput, StockSnapshotContext},
     error::{AppError, AppResult},
+    investment_system::{self, InvestmentSystem, UpdateInvestmentSystemRequest},
+    locale::Locale,
+    market_data::MarketDataProvider,
+    memo, portfolio,
     state::AppState,
     time::now_iso,
 };
@@ -81,6 +88,35 @@ pub struct CreateResearchRecord {
     pub analysis: ResearchAnalysis,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct DistillResearchRequest {
+    pub title: String,
+    pub source_type: Option<String>,
+    pub source_title: Option<String>,
+    pub source_author: Option<String>,
+    pub source_content: String,
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StockSnapshotRequest {
+    pub symbol: String,
+    pub memo_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdoptResearchCandidatesRequest {
+    pub principles: Vec<String>,
+    pub checklist_items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResearchRecordListParams {
+    pub kind: Option<String>,
+    pub symbol: Option<String>,
+    pub q: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ResearchRecordQuery {
     pub kind: Option<ResearchRecordKind>,
@@ -90,6 +126,206 @@ pub struct ResearchRecordQuery {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+}
+
+pub async fn distill(
+    pool: &SqlitePool,
+    ai: Arc<AiRuntime>,
+    request: DistillResearchRequest,
+    locale: Locale,
+) -> AppResult<ResearchRecord> {
+    if request.title.trim().is_empty() {
+        return Err(AppError::bad_request("title is required"));
+    }
+    if request.source_content.trim().is_empty() {
+        return Err(AppError::bad_request("source content is required"));
+    }
+
+    let input = ResearchSourceInput {
+        title: request.title.trim().to_string(),
+        source_type: clean_option(request.source_type.clone()),
+        source_title: clean_option(request.source_title.clone()),
+        source_author: clean_option(request.source_author.clone()),
+        source_content: request.source_content.trim().to_string(),
+        symbol: clean_option(request.symbol.clone()),
+    };
+    let analysis = ai
+        .distill_research_source(&input, locale)
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?;
+
+    create_record(
+        pool,
+        CreateResearchRecord {
+            kind: ResearchRecordKind::Distillation,
+            title: input.title,
+            source_type: input.source_type,
+            source_title: input.source_title,
+            source_author: input.source_author,
+            source_content: Some(input.source_content),
+            symbol: input.symbol,
+            memo_id: None,
+            analysis,
+        },
+    )
+    .await
+}
+
+pub async fn analyze_stock_snapshot(
+    pool: &SqlitePool,
+    ai: Arc<AiRuntime>,
+    market_data: Arc<dyn MarketDataProvider>,
+    request: StockSnapshotRequest,
+    locale: Locale,
+) -> AppResult<ResearchRecord> {
+    let symbol = request.symbol.trim().to_ascii_uppercase();
+    if symbol.is_empty() {
+        return Err(AppError::bad_request("symbol is required"));
+    }
+
+    let positions = portfolio::list_positions(pool).await?;
+    let position = positions
+        .iter()
+        .find(|position| position.symbol.eq_ignore_ascii_case(&symbol))
+        .cloned();
+    let portfolio_summary = portfolio::summary(pool).await?;
+    let related_memos = memo::list(pool)
+        .await?
+        .into_iter()
+        .filter(|memo| {
+            memo.symbol
+                .as_deref()
+                .is_some_and(|item| item.eq_ignore_ascii_case(&symbol))
+        })
+        .collect::<Vec<_>>();
+    let selected_memo = match request
+        .memo_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(id) => Some(memo::get(pool, id).await?),
+        None => None,
+    };
+    let (quote, quote_error) = match market_data.quote(&symbol).await {
+        Ok(quote) => (Some(quote), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+
+    let context = StockSnapshotContext {
+        symbol: symbol.clone(),
+        position,
+        portfolio_summary,
+        related_memos,
+        selected_memo: selected_memo.clone(),
+        quote,
+        quote_error,
+    };
+    let analysis = ai
+        .analyze_stock_snapshot(&context, locale)
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?;
+
+    create_record(
+        pool,
+        CreateResearchRecord {
+            kind: ResearchRecordKind::StockSnapshot,
+            title: format!("{symbol} stock snapshot"),
+            source_type: Some("portfolio".to_string()),
+            source_title: Some(format!("{symbol} current context")),
+            source_author: None,
+            source_content: Some(serde_json::to_string_pretty(&context)?),
+            symbol: Some(symbol),
+            memo_id: selected_memo.map(|memo| memo.id),
+            analysis,
+        },
+    )
+    .await
+}
+
+pub async fn review_portfolio(
+    pool: &SqlitePool,
+    ai: Arc<AiRuntime>,
+    locale: Locale,
+) -> AppResult<ResearchRecord> {
+    let positions = portfolio::list_positions(pool).await?;
+    if positions.is_empty() {
+        return Err(AppError::bad_request("portfolio has no positions"));
+    }
+
+    let summary = portfolio::summary(pool).await?;
+    let memos = memo::list(pool).await?;
+    let holdings_without_memo = positions
+        .iter()
+        .filter(|position| {
+            !memos.iter().any(|memo| {
+                memo.symbol
+                    .as_deref()
+                    .is_some_and(|symbol| symbol.eq_ignore_ascii_case(&position.symbol))
+                    && !memo.thesis.trim().is_empty()
+            })
+        })
+        .map(|position| position.symbol.clone())
+        .collect::<Vec<_>>();
+
+    let context = PortfolioReviewContext {
+        positions,
+        summary,
+        holdings_without_memo,
+    };
+    let analysis = ai
+        .review_portfolio_risk(&context, locale)
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?;
+
+    create_record(
+        pool,
+        CreateResearchRecord {
+            kind: ResearchRecordKind::PortfolioReview,
+            title: "Portfolio risk review".to_string(),
+            source_type: Some("portfolio".to_string()),
+            source_title: Some("Current portfolio".to_string()),
+            source_author: None,
+            source_content: Some(serde_json::to_string_pretty(&context)?),
+            symbol: None,
+            memo_id: None,
+            analysis,
+        },
+    )
+    .await
+}
+
+pub async fn adopt_candidates(
+    pool: &SqlitePool,
+    record_id: &str,
+    request: AdoptResearchCandidatesRequest,
+    locale: Locale,
+) -> AppResult<InvestmentSystem> {
+    let record = get_record(pool, record_id).await?;
+    let selected_principles = matching_candidates(request.principles, &record.candidate_principles);
+    let selected_checklist =
+        matching_candidates(request.checklist_items, &record.candidate_checklist_items);
+
+    if selected_principles.is_empty() && selected_checklist.is_empty() {
+        return Err(AppError::bad_request(
+            "no selected candidates match this record",
+        ));
+    }
+
+    let mut system = investment_system::get_or_default_with_locale(pool, locale).await?;
+    system.principles.extend(selected_principles);
+    system.checklist_items.extend(selected_checklist);
+
+    investment_system::update_with_locale(
+        pool,
+        UpdateInvestmentSystemRequest {
+            principles: Some(dedupe(system.principles)),
+            checklist_items: Some(dedupe(system.checklist_items)),
+            circle_of_competence: Some(system.circle_of_competence),
+            decision_rules: Some(system.decision_rules),
+        },
+        locale,
+    )
+    .await
 }
 
 pub async fn create_record(
@@ -269,4 +505,28 @@ fn non_empty_string(value: String) -> Option<String> {
 
 fn normalize_symbol(value: String) -> Option<String> {
     non_empty_string(value).map(|value| value.to_uppercase())
+}
+
+fn clean_option(value: Option<String>) -> Option<String> {
+    value.and_then(non_empty_string)
+}
+
+fn matching_candidates(selected: Vec<String>, allowed: &[String]) -> Vec<String> {
+    selected
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| allowed.iter().any(|allowed| allowed.trim() == value))
+        .collect()
+}
+
+fn dedupe(values: Vec<String>) -> Vec<String> {
+    let mut result = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() && !result.iter().any(|existing: &String| existing == trimmed) {
+            result.push(trimmed.to_string());
+        }
+    }
+    result
 }

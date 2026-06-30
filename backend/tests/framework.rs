@@ -232,6 +232,116 @@ async fn research_records_can_be_created_listed_filtered_and_loaded() {
 }
 
 #[tokio::test]
+async fn research_distillation_workflow_saves_record() {
+    let pool = test_pool().await;
+    let ai = Arc::new(mock_ai_runtime());
+
+    let record = research::distill(
+        &pool,
+        ai,
+        research::DistillResearchRequest {
+            title: "Munger notes".to_string(),
+            source_type: Some("person".to_string()),
+            source_title: Some("Interview notes".to_string()),
+            source_author: Some("Charlie Munger".to_string()),
+            source_content: "Invert before deciding.".to_string(),
+            symbol: Some(" brk.b ".to_string()),
+        },
+        Locale::En,
+    )
+    .await
+    .expect("distill research source");
+
+    assert_eq!(record.kind, research::ResearchRecordKind::Distillation);
+    assert_eq!(record.symbol.as_deref(), Some("BRK.B"));
+    assert!(!record.candidate_principles.is_empty());
+}
+
+#[tokio::test]
+async fn portfolio_review_requires_positions() {
+    let pool = test_pool().await;
+    let ai = Arc::new(mock_ai_runtime());
+
+    let error = research::review_portfolio(&pool, ai, Locale::En)
+        .await
+        .expect_err("empty portfolio should fail");
+
+    assert!(format!("{error:?}").contains("portfolio has no positions"));
+}
+
+#[tokio::test]
+async fn research_adoption_merges_candidates_without_duplicates() {
+    let pool = test_pool().await;
+    let mut request = research_request(
+        "Adoption source",
+        "Candidate summary.",
+        Some("BRK.B"),
+        research::ResearchRecordKind::Distillation,
+    );
+    request.analysis.candidate_principles = vec!["Invert before underwriting.".to_string()];
+    request.analysis.candidate_checklist_items =
+        vec!["What would make this thesis fail?".to_string()];
+    let record = research::create_record(&pool, request)
+        .await
+        .expect("create research record");
+
+    let system = research::adopt_candidates(
+        &pool,
+        &record.id,
+        research::AdoptResearchCandidatesRequest {
+            principles: vec![
+                "Invert before underwriting.".to_string(),
+                "Invert before underwriting.".to_string(),
+            ],
+            checklist_items: vec![
+                "What would make this thesis fail?".to_string(),
+                "What would make this thesis fail?".to_string(),
+            ],
+        },
+        Locale::En,
+    )
+    .await
+    .expect("adopt matching candidates");
+
+    assert!(system
+        .principles
+        .contains(&"Invert before underwriting.".to_string()));
+    assert!(system
+        .checklist_items
+        .contains(&"What would make this thesis fail?".to_string()));
+    assert_eq!(
+        system
+            .principles
+            .iter()
+            .filter(|item| item.as_str() == "Invert before underwriting.")
+            .count(),
+        1
+    );
+    assert_eq!(
+        system
+            .checklist_items
+            .iter()
+            .filter(|item| item.as_str() == "What would make this thesis fail?")
+            .count(),
+        1
+    );
+
+    let error = research::adopt_candidates(
+        &pool,
+        &record.id,
+        research::AdoptResearchCandidatesRequest {
+            principles: vec!["Buy because it is down.".to_string()],
+            checklist_items: Vec::new(),
+        },
+        Locale::En,
+    )
+    .await
+    .expect_err("unknown candidates should fail");
+
+    assert!(format!("{error:?}").contains("no selected candidates"));
+}
+
+#[tokio::test]
 async fn research_create_record_rejects_empty_required_fields() {
     let pool = test_pool().await;
 
@@ -648,6 +758,24 @@ fn research_request(
             candidate_checklist_items: vec!["What breaks the moat?".to_string()],
         },
     }
+}
+
+fn mock_ai_runtime() -> AiRuntime {
+    AiRuntime::new(
+        AiSettings {
+            provider: AiProviderKind::Mock,
+            openai_api_key: None,
+            openai_base_url: "https://api.openai.com/v1".to_string(),
+            openai_model: "gpt-4.1-mini".to_string(),
+            cli: CliSettings {
+                provider: CliProviderKind::Codex,
+                path: "codex".to_string(),
+                model: None,
+                profile: None,
+            },
+        },
+        ".env.test",
+    )
 }
 
 fn assert_research_analysis_arrays_non_empty(analysis: &prudentia_backend::ai::ResearchAnalysis) {
