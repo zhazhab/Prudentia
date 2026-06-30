@@ -144,8 +144,7 @@ async fn list_records_handler(
     Query(params): Query<ResearchRecordListParams>,
 ) -> AppResult<Json<Vec<ResearchRecord>>> {
     let query = ResearchRecordQuery {
-        kind: params
-            .kind
+        kind: clean_option(params.kind)
             .as_deref()
             .map(|kind| {
                 ResearchRecordKind::parse(kind)

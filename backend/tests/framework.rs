@@ -300,8 +300,16 @@ async fn research_routes_create_and_list_distillations() {
         .expect("response");
 
     assert_eq!(create_response.status(), StatusCode::OK);
+    let body = to_bytes(create_response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let created: research::ResearchRecord = serde_json::from_slice(&body).expect("json");
+    assert_eq!(created.kind, research::ResearchRecordKind::Distillation);
+    assert_eq!(created.symbol.as_deref(), Some("BRK.B"));
+    assert_eq!(created.title, "Munger notes");
 
     let list_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -318,6 +326,41 @@ async fn research_routes_create_and_list_distillations() {
         .expect("body");
     let records: Vec<research::ResearchRecord> = serde_json::from_slice(&body).expect("json");
     assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, research::ResearchRecordKind::Distillation);
+    assert_eq!(records[0].symbol.as_deref(), Some("BRK.B"));
+    assert_eq!(records[0].title, "Munger notes");
+
+    let empty_kind_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/research/records?kind=")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(empty_kind_response.status(), StatusCode::OK);
+
+    let invalid_kind_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/research/records?kind=nope")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(invalid_kind_response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(invalid_kind_response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let error: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(error["error"], "invalid research record kind");
 }
 
 #[tokio::test]
