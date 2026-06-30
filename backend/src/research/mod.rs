@@ -206,6 +206,15 @@ pub async fn analyze_stock_snapshot(
         Some(id) => Some(memo::get(pool, id).await?),
         None => None,
     };
+    if let Some(memo) = &selected_memo {
+        if !memo
+            .symbol
+            .as_deref()
+            .is_some_and(|memo_symbol| memo_symbol.eq_ignore_ascii_case(&symbol))
+        {
+            return Err(AppError::bad_request("selected memo does not match symbol"));
+        }
+    }
     let (quote, quote_error) = match market_data.quote(&symbol).await {
         Ok(quote) => (Some(quote), None),
         Err(error) => (None, Some(error.to_string())),

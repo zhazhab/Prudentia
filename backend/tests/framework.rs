@@ -258,7 +258,7 @@ async fn research_distillation_workflow_saves_record() {
 }
 
 #[tokio::test]
-async fn portfolio_review_requires_positions() {
+async fn research_portfolio_review_requires_positions() {
     let pool = test_pool().await;
     let ai = Arc::new(mock_ai_runtime());
 
@@ -267,6 +267,199 @@ async fn portfolio_review_requires_positions() {
         .expect_err("empty portfolio should fail");
 
     assert!(format!("{error:?}").contains("portfolio has no positions"));
+}
+
+#[tokio::test]
+async fn research_stock_snapshot_rejects_selected_memo_for_different_symbol() {
+    let pool = test_pool().await;
+    let memo = memo::create(
+        &pool,
+        CreateMemoRequest {
+            title: "Apple thesis".to_string(),
+            symbol: Some("AAPL".to_string()),
+            asset_type: None,
+            thesis: Some("Services durability.".to_string()),
+            risks: None,
+            catalysts: None,
+            disconfirming_evidence: None,
+            notes: None,
+            status: None,
+            tags: None,
+        },
+    )
+    .await
+    .expect("memo");
+
+    let error = research::analyze_stock_snapshot(
+        &pool,
+        Arc::new(mock_ai_runtime()),
+        Arc::new(FailingProvider),
+        research::StockSnapshotRequest {
+            symbol: "MSFT".to_string(),
+            memo_id: Some(memo.id),
+        },
+        Locale::En,
+    )
+    .await
+    .expect_err("mismatched selected memo should fail");
+
+    assert!(format!("{error:?}").contains("selected memo does not match symbol"));
+}
+
+#[tokio::test]
+async fn research_stock_snapshot_saves_context_with_matching_memo_and_quote_error() {
+    let pool = test_pool().await;
+    let selected = memo::create(
+        &pool,
+        CreateMemoRequest {
+            title: "Berkshire thesis".to_string(),
+            symbol: Some("brk.b".to_string()),
+            asset_type: None,
+            thesis: Some("Decentralized capital allocation.".to_string()),
+            risks: None,
+            catalysts: None,
+            disconfirming_evidence: None,
+            notes: None,
+            status: None,
+            tags: None,
+        },
+    )
+    .await
+    .expect("selected memo");
+    memo::create(
+        &pool,
+        CreateMemoRequest {
+            title: "Apple thesis".to_string(),
+            symbol: Some("AAPL".to_string()),
+            asset_type: None,
+            thesis: Some("Services durability.".to_string()),
+            risks: None,
+            catalysts: None,
+            disconfirming_evidence: None,
+            notes: None,
+            status: None,
+            tags: None,
+        },
+    )
+    .await
+    .expect("other memo");
+
+    let record = research::analyze_stock_snapshot(
+        &pool,
+        Arc::new(mock_ai_runtime()),
+        Arc::new(FailingProvider),
+        research::StockSnapshotRequest {
+            symbol: " brk.b ".to_string(),
+            memo_id: Some(selected.id.clone()),
+        },
+        Locale::En,
+    )
+    .await
+    .expect("stock snapshot");
+
+    assert_eq!(record.kind, research::ResearchRecordKind::StockSnapshot);
+    assert_eq!(record.symbol.as_deref(), Some("BRK.B"));
+    assert_eq!(record.memo_id.as_deref(), Some(selected.id.as_str()));
+
+    let context: serde_json::Value =
+        serde_json::from_str(record.source_content.as_deref().expect("source content"))
+            .expect("source content json");
+    assert_eq!(context["selected_memo"]["id"], selected.id);
+    assert_eq!(context["quote_error"], "BRK.B unavailable");
+
+    let related_symbols = context["related_memos"]
+        .as_array()
+        .expect("related memos array")
+        .iter()
+        .map(|memo| memo["symbol"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(related_symbols, vec!["brk.b".to_string()]);
+}
+
+#[tokio::test]
+async fn research_portfolio_review_source_content_tracks_holdings_without_memos() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: [
+            "symbol,name,quantity,average cost,currency,sector,market value",
+            "AAPL,Apple,2,100,USD,Technology,250",
+            "MSFT,Microsoft,1,200,USD,Technology,220",
+            "TSLA,Tesla,1,150,USD,Consumer Discretionary,180",
+        ]
+        .join("\n"),
+        content_encoding: None,
+    })
+    .expect("preview");
+    portfolio::commit_import(
+        &pool,
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: [
+                "symbol,name,quantity,average cost,currency,sector,market value",
+                "AAPL,Apple,2,100,USD,Technology,250",
+                "MSFT,Microsoft,1,200,USD,Technology,220",
+                "TSLA,Tesla,1,150,USD,Consumer Discretionary,180",
+            ]
+            .join("\n"),
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+    memo::create(
+        &pool,
+        CreateMemoRequest {
+            title: "Apple thesis".to_string(),
+            symbol: Some("aapl".to_string()),
+            asset_type: None,
+            thesis: Some("Services durability.".to_string()),
+            risks: None,
+            catalysts: None,
+            disconfirming_evidence: None,
+            notes: None,
+            status: None,
+            tags: None,
+        },
+    )
+    .await
+    .expect("aapl memo");
+    memo::create(
+        &pool,
+        CreateMemoRequest {
+            title: "Microsoft blank thesis".to_string(),
+            symbol: Some("MSFT".to_string()),
+            asset_type: None,
+            thesis: Some("   ".to_string()),
+            risks: None,
+            catalysts: None,
+            disconfirming_evidence: None,
+            notes: None,
+            status: None,
+            tags: None,
+        },
+    )
+    .await
+    .expect("msft memo");
+
+    let record = research::review_portfolio(&pool, Arc::new(mock_ai_runtime()), Locale::En)
+        .await
+        .expect("portfolio review");
+
+    let context: serde_json::Value =
+        serde_json::from_str(record.source_content.as_deref().expect("source content"))
+            .expect("source content json");
+    let holdings = context["holdings_without_memo"]
+        .as_array()
+        .expect("holdings array")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(holdings.contains(&"MSFT".to_string()));
+    assert!(holdings.contains(&"TSLA".to_string()));
+    assert!(!holdings.contains(&"AAPL".to_string()));
 }
 
 #[tokio::test]
@@ -290,12 +483,14 @@ async fn research_adoption_merges_candidates_without_duplicates() {
         &record.id,
         research::AdoptResearchCandidatesRequest {
             principles: vec![
+                "  Invert before underwriting.  ".to_string(),
                 "Invert before underwriting.".to_string(),
-                "Invert before underwriting.".to_string(),
+                "Buy because it is down.".to_string(),
             ],
             checklist_items: vec![
+                " What would make this thesis fail? ".to_string(),
                 "What would make this thesis fail?".to_string(),
-                "What would make this thesis fail?".to_string(),
+                "Ignore valuation.".to_string(),
             ],
         },
         Locale::En,
