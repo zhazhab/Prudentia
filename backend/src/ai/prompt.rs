@@ -1,4 +1,9 @@
-use crate::{investment_system::InvestmentSystem, locale::Locale, memo::Memo};
+use crate::{
+    ai::{PortfolioReviewContext, ResearchSourceInput, StockSnapshotContext},
+    investment_system::InvestmentSystem,
+    locale::Locale,
+    memo::Memo,
+};
 
 pub fn memo_extraction_prompt(memo: &Memo, locale: Locale) -> String {
     format!(
@@ -46,6 +51,88 @@ Refine this personal investment system:
 "#,
         language_name(locale),
         serde_json::to_string_pretty(system).unwrap_or_default()
+    )
+}
+
+pub fn research_distillation_prompt(input: &ResearchSourceInput, locale: Locale) -> String {
+    format!(
+        r#"
+Return strict JSON only, with no markdown fences. The JSON shape is:
+{{
+  "summary": "string",
+  "insights": ["string"],
+  "risks": ["string"],
+  "checklist": ["string"],
+  "candidate_principles": ["string"],
+  "candidate_checklist_items": ["string"]
+}}
+
+Language: {}
+
+Distill the research source below into investment-research notes. Do not invent external facts.
+Title: {}
+Source type: {:?}
+Source title: {:?}
+Source author: {:?}
+Symbol: {:?}
+Source content:
+{}
+"#,
+        language_name(locale),
+        input.title,
+        input.source_type,
+        input.source_title,
+        input.source_author,
+        input.symbol,
+        input.source_content
+    )
+}
+
+pub fn stock_snapshot_prompt(context: &StockSnapshotContext, locale: Locale) -> String {
+    format!(
+        r#"
+Return strict JSON only, with no markdown fences. The JSON shape is:
+{{
+  "summary": "string",
+  "insights": ["string"],
+  "risks": ["string"],
+  "checklist": ["string"],
+  "candidate_principles": ["string"],
+  "candidate_checklist_items": ["string"]
+}}
+
+Language: {}
+
+Analyze this stock snapshot context for research purposes. Do not give buy, sell, trim, add, or hold instructions.
+Context:
+{}
+"#,
+        language_name(locale),
+        serde_json::to_string_pretty(context).unwrap_or_default()
+    )
+}
+
+pub fn portfolio_review_prompt(context: &PortfolioReviewContext, locale: Locale) -> String {
+    format!(
+        r#"
+Return strict JSON only, with no markdown fences. The JSON shape is:
+{{
+  "summary": "string",
+  "insights": ["string"],
+  "risks": ["string"],
+  "checklist": ["string"],
+  "candidate_principles": ["string"],
+  "candidate_checklist_items": ["string"]
+}}
+
+Language: {}
+
+Review this portfolio risk context for research purposes. Do not give buy, sell, trim, add, or hold instructions.
+Context:
+{}
+"#,
+        language_name(locale),
+        serde_json::to_string_pretty(context).unwrap_or_default()
     )
 }
 

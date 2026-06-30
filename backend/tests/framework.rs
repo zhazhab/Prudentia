@@ -545,6 +545,29 @@ fn ai_settings_update_can_persist_env_without_echoing_secret() {
     assert!(env.contains("AI_CLI_PROFILE=personal"));
 }
 
+#[tokio::test]
+async fn mock_ai_returns_structured_research_analysis() {
+    let provider = prudentia_backend::ai::mock::MockAiProvider;
+    let analysis = prudentia_backend::ai::AiProvider::distill_research_source(
+        &provider,
+        &prudentia_backend::ai::ResearchSourceInput {
+            title: "Munger notes".to_string(),
+            source_type: Some("person".to_string()),
+            source_title: Some("Interview notes".to_string()),
+            source_author: Some("Charlie Munger".to_string()),
+            source_content: "Invert before deciding.".to_string(),
+            symbol: None,
+        },
+        Locale::En,
+    )
+    .await
+    .expect("mock distillation");
+
+    assert!(analysis.summary.contains("Munger notes"));
+    assert!(!analysis.insights.is_empty());
+    assert!(!analysis.candidate_checklist_items.is_empty());
+}
+
 fn research_request(
     title: &str,
     summary: &str,

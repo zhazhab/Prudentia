@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 
 use crate::{
-    ai::{AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction},
+    ai::{
+        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioReviewContext,
+        ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
+    },
     investment_system::InvestmentSystem,
     locale::Locale,
     memo::Memo,
@@ -104,6 +107,97 @@ impl AiProvider for MockAiProvider {
                 "Mock refinement: your system emphasizes explicit thesis writing, risk naming, and review discipline.".to_string()
             },
         })
+    }
+
+    async fn distill_research_source(
+        &self,
+        input: &ResearchSourceInput,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        let summary = if locale.is_zh() {
+            format!(
+                "Mock 研究整理：{} 强调把判断写清楚并用检查清单复盘。",
+                input.title
+            )
+        } else {
+            format!(
+                "Mock research distillation: {} emphasizes clear judgment and checklist review.",
+                input.title
+            )
+        };
+
+        Ok(mock_research_analysis(locale, summary))
+    }
+
+    async fn analyze_stock_snapshot(
+        &self,
+        context: &StockSnapshotContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        let summary = if locale.is_zh() {
+            format!(
+                "Mock 股票快照：{} 需要结合 thesis、仓位和报价复盘。",
+                context.symbol
+            )
+        } else {
+            format!(
+                "Mock stock snapshot: {} should be reviewed against thesis, position, and quote context.",
+                context.symbol
+            )
+        };
+
+        Ok(mock_research_analysis(locale, summary))
+    }
+
+    async fn review_portfolio_risk(
+        &self,
+        context: &PortfolioReviewContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        let summary = if locale.is_zh() {
+            format!(
+                "Mock 组合复盘：{} 个持仓需要按风险来源归类。",
+                context.positions.len()
+            )
+        } else {
+            format!(
+                "Mock portfolio review: {} positions should be grouped by source of risk.",
+                context.positions.len()
+            )
+        };
+
+        Ok(mock_research_analysis(locale, summary))
+    }
+}
+
+fn mock_research_analysis(locale: Locale, summary: String) -> ResearchAnalysis {
+    if locale.is_zh() {
+        ResearchAnalysis {
+            summary,
+            insights: vec!["把事实、判断和待验证假设分开记录。".to_string()],
+            risks: vec!["主要风险来自 thesis 漂移、估值和执行偏差。".to_string()],
+            checklist: vec!["复盘前先写下最重要的反证信号。".to_string()],
+            candidate_principles: vec!["先定义可证伪条件，再形成结论。".to_string()],
+            candidate_checklist_items: vec!["什么事实会推翻当前判断？".to_string()],
+        }
+    } else {
+        ResearchAnalysis {
+            summary,
+            insights: vec!["Separate facts, judgments, and hypotheses to verify.".to_string()],
+            risks: vec![
+                "Key risks include thesis drift, valuation pressure, and execution misses."
+                    .to_string(),
+            ],
+            checklist: vec![
+                "Name the most important disconfirming signal before review.".to_string(),
+            ],
+            candidate_principles: vec![
+                "Define falsifiable conditions before forming the conclusion.".to_string(),
+            ],
+            candidate_checklist_items: vec![
+                "What fact would overturn the current view?".to_string()
+            ],
+        }
     }
 }
 

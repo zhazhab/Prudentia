@@ -10,6 +10,7 @@ use crate::{
     ai::{
         cli::{CliProviderKind, CliSettings},
         provider_from_settings, AiError, InvestmentSystemRefinement, MemoExtraction,
+        PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
     },
     config::AppConfig,
     investment_system::InvestmentSystem,
@@ -179,6 +180,51 @@ impl AiRuntime {
             .clone();
         provider_from_settings(&settings)
             .refine_system(system, locale)
+            .await
+    }
+
+    pub async fn distill_research_source(
+        &self,
+        input: &ResearchSourceInput,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        provider_from_settings(&settings)
+            .distill_research_source(input, locale)
+            .await
+    }
+
+    pub async fn analyze_stock_snapshot(
+        &self,
+        context: &StockSnapshotContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        provider_from_settings(&settings)
+            .analyze_stock_snapshot(context, locale)
+            .await
+    }
+
+    pub async fn review_portfolio_risk(
+        &self,
+        context: &PortfolioReviewContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        provider_from_settings(&settings)
+            .review_portfolio_risk(context, locale)
             .await
     }
 }

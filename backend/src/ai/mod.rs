@@ -4,7 +4,14 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{config::AppConfig, investment_system::InvestmentSystem, locale::Locale, memo::Memo};
+use crate::{
+    config::AppConfig,
+    investment_system::InvestmentSystem,
+    locale::Locale,
+    market_data::MarketQuote,
+    memo::Memo,
+    portfolio::{PortfolioPosition, PortfolioSummary},
+};
 
 pub mod cli;
 pub mod mock;
@@ -20,6 +27,21 @@ pub trait AiProvider: Send + Sync {
         system: &InvestmentSystem,
         locale: Locale,
     ) -> Result<InvestmentSystemRefinement, AiError>;
+    async fn distill_research_source(
+        &self,
+        input: &ResearchSourceInput,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError>;
+    async fn analyze_stock_snapshot(
+        &self,
+        context: &StockSnapshotContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError>;
+    async fn review_portfolio_risk(
+        &self,
+        context: &PortfolioReviewContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError>;
 }
 
 #[derive(Debug, Error)]
@@ -44,6 +66,44 @@ pub struct InvestmentSystemRefinement {
     pub circle_of_competence: Vec<String>,
     pub decision_rules: Vec<String>,
     pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchAnalysis {
+    pub summary: String,
+    pub insights: Vec<String>,
+    pub risks: Vec<String>,
+    pub checklist: Vec<String>,
+    pub candidate_principles: Vec<String>,
+    pub candidate_checklist_items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResearchSourceInput {
+    pub title: String,
+    pub source_type: Option<String>,
+    pub source_title: Option<String>,
+    pub source_author: Option<String>,
+    pub source_content: String,
+    pub symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StockSnapshotContext {
+    pub symbol: String,
+    pub position: Option<PortfolioPosition>,
+    pub portfolio_summary: PortfolioSummary,
+    pub related_memos: Vec<Memo>,
+    pub selected_memo: Option<Memo>,
+    pub quote: Option<MarketQuote>,
+    pub quote_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioReviewContext {
+    pub positions: Vec<PortfolioPosition>,
+    pub summary: PortfolioSummary,
+    pub holdings_without_memo: Vec<String>,
 }
 
 pub fn provider_from_config(config: &AppConfig) -> Arc<dyn AiProvider> {

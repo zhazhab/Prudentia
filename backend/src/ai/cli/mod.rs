@@ -7,8 +7,10 @@ use crate::{
     ai::{
         prompt::{
             extract_json_object, investment_system_refinement_prompt, memo_extraction_prompt,
+            portfolio_review_prompt, research_distillation_prompt, stock_snapshot_prompt,
         },
-        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction,
+        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioReviewContext,
+        ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
     locale::Locale,
@@ -120,6 +122,32 @@ where
         locale: Locale,
     ) -> Result<InvestmentSystemRefinement, AiError> {
         self.run_json(investment_system_refinement_prompt(system, locale))
+            .await
+    }
+
+    async fn distill_research_source(
+        &self,
+        input: &ResearchSourceInput,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        self.run_json(research_distillation_prompt(input, locale))
+            .await
+    }
+
+    async fn analyze_stock_snapshot(
+        &self,
+        context: &StockSnapshotContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        self.run_json(stock_snapshot_prompt(context, locale)).await
+    }
+
+    async fn review_portfolio_risk(
+        &self,
+        context: &PortfolioReviewContext,
+        locale: Locale,
+    ) -> Result<ResearchAnalysis, AiError> {
+        self.run_json(portfolio_review_prompt(context, locale))
             .await
     }
 }
