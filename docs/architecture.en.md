@@ -18,6 +18,7 @@ Engineering style is documented in [engineering-style.en.md](engineering-style.e
 ## Backend Modules
 
 - `memo`: thesis notes, risks, catalysts, disconfirming evidence, tags, and memo AI extraction.
+- `research`: local research records, article/person thought distillation, stock snapshots, portfolio reviews, and adoption of candidate principles/checklist items.
 - `investment_system`: personal principles, checklist, competence boundaries, and decision rules.
 - `portfolio`: import preview, mapping, commit, position calculations, summaries, and refresh orchestration.
 - `market_data`: quote provider trait with mock and Alpha Vantage-compatible implementations.

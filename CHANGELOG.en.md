@@ -6,6 +6,7 @@ All notable changes to Prudentia should be recorded here. Add the newest entry a
 
 ## Unreleased
 
+- Added the Research Library with article/person investment-thought distillation, stock snapshot analysis, portfolio reviews, and adoption of candidate principles/checklist items into the investment system.
 - Added repository name explanation, vision, ideal goals, and planned capabilities to the README.
 - Split bilingual documentation into separate files: Simplified Chinese stays in `.md`, and English uses `.en.md`.
 - Made the changelog available in English and Simplified Chinese.

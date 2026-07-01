@@ -34,6 +34,55 @@ Base URL: `http://127.0.0.1:8080`
 - `PATCH /api/investment-system/`
 - `POST /api/investment-system/ai/refine`
 
+## Research
+
+- `GET /api/research/records`
+- `GET /api/research/records?kind=distillation&symbol=AAPL&q=moat`
+- `GET /api/research/records/{id}`
+- `POST /api/research/distill`
+- `POST /api/research/stock-snapshot`
+- `POST /api/research/portfolio-review`
+- `POST /api/research/records/{id}/adopt`
+
+`kind` accepts `distillation`, `stock_snapshot`, and `portfolio_review`.
+
+Article or person investment-thought distillation request:
+
+```json
+{
+  "title": "Munger mental models",
+  "source_type": "article",
+  "source_title": "The Psychology of Human Misjudgment",
+  "source_author": "Charlie Munger",
+  "source_content": "Raw article, transcript, notes, or profile material.",
+  "symbol": "optional-symbol"
+}
+```
+
+Stock snapshot requests combine the current holding, quote, related memos, and an optional selected memo:
+
+```json
+{
+  "symbol": "AAPL",
+  "memo_id": "optional-memo-id"
+}
+```
+
+Portfolio reviews are generated from current portfolio positions:
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
+```
+
+Distillations, stock snapshots, and portfolio reviews are saved as research records. Candidate principles/checklist items from a record can be adopted into the investment system:
+
+```json
+{
+  "principles": ["Only underwrite what can be falsified."],
+  "checklist_items": ["What would prove the thesis wrong?"]
+}
+```
+
 ## Portfolio
 
 - `POST /api/portfolio/import/preview`

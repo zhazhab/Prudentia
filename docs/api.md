@@ -34,6 +34,55 @@ Base URL：`http://127.0.0.1:8080`
 - `PATCH /api/investment-system/`
 - `POST /api/investment-system/ai/refine`
 
+## Research
+
+- `GET /api/research/records`
+- `GET /api/research/records?kind=distillation&symbol=AAPL&q=moat`
+- `GET /api/research/records/{id}`
+- `POST /api/research/distill`
+- `POST /api/research/stock-snapshot`
+- `POST /api/research/portfolio-review`
+- `POST /api/research/records/{id}/adopt`
+
+`kind` 支持 `distillation`、`stock_snapshot` 和 `portfolio_review`。
+
+文章或人物投资思想蒸馏请求：
+
+```json
+{
+  "title": "Munger mental models",
+  "source_type": "article",
+  "source_title": "The Psychology of Human Misjudgment",
+  "source_author": "Charlie Munger",
+  "source_content": "Raw article, transcript, notes, or profile material.",
+  "symbol": "optional-symbol"
+}
+```
+
+股票快照请求会结合当前持仓、行情、相关 memo 和可选指定 memo：
+
+```json
+{
+  "symbol": "AAPL",
+  "memo_id": "optional-memo-id"
+}
+```
+
+组合复盘从当前 portfolio positions 生成：
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
+```
+
+蒸馏、股票快照和组合复盘都会保存为 research record。可将记录里的候选原则/checklist 写入投资体系：
+
+```json
+{
+  "principles": ["Only underwrite what can be falsified."],
+  "checklist_items": ["What would prove the thesis wrong?"]
+}
+```
+
 ## Portfolio
 
 - `POST /api/portfolio/import/preview`

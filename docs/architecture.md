@@ -18,6 +18,7 @@ Prudentia 是一个本地优先的 monorepo：
 ## 后端模块
 
 - `memo`：thesis notes、risks、catalysts、disconfirming evidence、tags 和 memo AI extraction。
+- `research`：本地研究记录、文章/人物思想蒸馏、股票快照、组合复盘，以及候选投资原则/checklist 采纳。
 - `investment_system`：个人原则、checklist、能力圈边界和决策规则。
 - `portfolio`：导入预览、字段映射、提交写入、position 计算、汇总和刷新编排。
 - `market_data`：quote provider trait，包含 mock 和 Alpha Vantage-compatible 实现。

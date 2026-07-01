@@ -21,6 +21,7 @@ In the ideal state, users can build their own investment system in Prudentia and
 - Rust backend with `axum`, `sqlx`, SQLite, provider-based AI, and provider-based market data.
 - React + Vite + TypeScript frontend with Dashboard, Portfolio, Memos, Investment System, and Profile views.
 - Portfolio CSV/Excel import preview, field mapping, commit flow, value/weight/P/L calculations, and scheduled quote refresh.
+- Research Library for article/person investment-thought distillation, stock snapshot analysis, portfolio reviews, and adopting candidate principles/checklist items into the investment system.
 - Rule-driven profile XP, levels, badges, attributes, and bias signals.
 - English and Simplified Chinese UI, with `Accept-Language` passed to backend-generated system text.
 
