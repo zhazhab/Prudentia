@@ -7,6 +7,7 @@ import type {
   DistillResearchRequest,
   Memo,
   MemoExtraction,
+  PortfolioImageImportPreview,
   PortfolioImportMapping,
   PortfolioImportPreview,
   PortfolioImportResult,
@@ -50,6 +51,13 @@ export interface FilePayload {
   file_name: string;
   content: string;
   content_encoding?: "base64";
+}
+
+export interface ImagePayload {
+  file_name: string;
+  content: string;
+  content_encoding: "base64";
+  mime_type: string;
 }
 
 function queryString(params: Record<string, string | undefined>) {
@@ -115,6 +123,11 @@ export const api = {
   portfolioSummary: () => request<PortfolioSummary>("/api/portfolio/summary"),
   previewPortfolioImport: (payload: FilePayload) =>
     request<PortfolioImportPreview>("/api/portfolio/import/preview", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  previewPortfolioImageImport: (payload: ImagePayload) =>
+    request<PortfolioImageImportPreview>("/api/portfolio/import/image/preview", {
       method: "POST",
       body: JSON.stringify(payload)
     }),

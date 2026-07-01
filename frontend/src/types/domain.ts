@@ -133,6 +133,27 @@ export interface PortfolioImportPreview {
   validation_errors: string[];
 }
 
+export interface PortfolioImageDraftRow {
+  symbol: string;
+  name: string;
+  quantity: string;
+  average_cost: string;
+  currency: string;
+  account?: string | null;
+  market?: string | null;
+  sector?: string | null;
+  imported_market_value?: string | null;
+  notes?: string | null;
+  confidence: "high" | "medium" | "low" | "unknown" | string;
+  warnings: string[];
+}
+
+export interface PortfolioImageImportPreview {
+  rows: PortfolioImageDraftRow[];
+  warnings: string[];
+  source: string;
+}
+
 export interface PortfolioImportResult {
   imported_count: number;
   skipped_count: number;

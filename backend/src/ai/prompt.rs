@@ -136,6 +136,97 @@ Context:
     )
 }
 
+pub fn portfolio_image_recognition_prompt() -> String {
+    r#"
+Return strict JSON only, with no markdown fences.
+
+Extract only the visible portfolio holding rows from the attached screenshot.
+Do not infer hidden rows, totals, average costs, market values, names, tickers, currencies, sectors, or accounts that are not visible.
+If a field is not visible, use an empty string for required string fields and null for optional fields.
+
+Return this JSON shape:
+{
+  "rows": [
+    {
+      "symbol": "string",
+      "name": "string",
+      "quantity": "string",
+      "average_cost": "string",
+      "currency": "string",
+      "account": "string or null",
+      "market": "string or null",
+      "sector": "string or null",
+      "imported_market_value": "string or null",
+      "notes": "string or null",
+      "confidence": "high|medium|low|unknown",
+      "warnings": ["string"]
+    }
+  ],
+  "warnings": ["string"]
+}
+"#
+    .trim()
+    .to_string()
+}
+
+pub fn portfolio_image_recognition_schema() -> &'static str {
+    r#"
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "symbol": { "type": "string" },
+          "name": { "type": "string" },
+          "quantity": { "type": "string" },
+          "average_cost": { "type": "string" },
+          "currency": { "type": "string" },
+          "account": { "type": ["string", "null"] },
+          "market": { "type": ["string", "null"] },
+          "sector": { "type": ["string", "null"] },
+          "imported_market_value": { "type": ["string", "null"] },
+          "notes": { "type": ["string", "null"] },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low", "unknown"]
+          },
+          "warnings": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": [
+          "symbol",
+          "name",
+          "quantity",
+          "average_cost",
+          "currency",
+          "account",
+          "market",
+          "sector",
+          "imported_market_value",
+          "notes",
+          "confidence",
+          "warnings"
+        ]
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": ["rows", "warnings"]
+}
+"#
+    .trim()
+}
+
 pub fn extract_json_object(value: &str) -> Option<&str> {
     let trimmed = value
         .trim()

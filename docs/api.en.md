@@ -86,6 +86,7 @@ Distillations, stock snapshots, and portfolio reviews are saved as research reco
 ## Portfolio
 
 - `POST /api/portfolio/import/preview`
+- `POST /api/portfolio/import/image/preview`
 - `POST /api/portfolio/import/commit`
 - `GET /api/portfolio/positions`
 - `GET /api/portfolio/summary`
@@ -117,6 +118,19 @@ Commit request:
 ```
 
 For `.xlsx` imports, send `content` as base64 and set `content_encoding` to `base64`.
+
+Screenshot recognition preview request:
+
+```json
+{
+  "file_name": "positions.png",
+  "content": "base64-image-content",
+  "content_encoding": "base64",
+  "mime_type": "image/png"
+}
+```
+
+Screenshot recognition uses the configured Codex CLI provider to extract visible holding rows. It returns editable draft rows and warnings only; it does not write to `portfolio_positions` or recompute portfolio weights or prices.
 
 ## Decisions
 

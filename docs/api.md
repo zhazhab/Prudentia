@@ -86,6 +86,7 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 ## Portfolio
 
 - `POST /api/portfolio/import/preview`
+- `POST /api/portfolio/import/image/preview`
 - `POST /api/portfolio/import/commit`
 - `GET /api/portfolio/positions`
 - `GET /api/portfolio/summary`
@@ -117,6 +118,19 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 ```
 
 导入 `.xlsx` 时，`content` 使用 base64，并将 `content_encoding` 设为 `base64`。
+
+截图识别预览请求：
+
+```json
+{
+  "file_name": "positions.png",
+  "content": "base64-image-content",
+  "content_encoding": "base64",
+  "mime_type": "image/png"
+}
+```
+
+截图识别会调用已配置的 Codex CLI provider 识别可见持仓行，只返回可编辑草稿和提示，不写入 `portfolio_positions`，也不会触发权重或行情重算。
 
 ## Decisions
 

@@ -107,6 +107,102 @@ async fn failed_price_refresh_marks_stale_and_keeps_value() {
 }
 
 #[tokio::test]
+async fn portfolio_image_preview_returns_drafts_without_persisting_positions() {
+    let pool = test_pool().await;
+    let app = startup::build_router(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(FailingProvider),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portfolio/import/image/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "file_name":"positions.png",
+                      "content":"aW1hZ2U=",
+                      "content_encoding":"base64",
+                      "mime_type":"image/png"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let preview: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    assert_eq!(preview["source"], "codex_cli");
+    assert_eq!(preview["rows"][0]["symbol"], "AAPL");
+    assert_eq!(preview["rows"][0]["confidence"], "high");
+
+    let summary = portfolio::summary(&pool).await.expect("summary");
+    assert_eq!(summary.positions_count, 0);
+}
+
+#[tokio::test]
+async fn portfolio_image_preview_rejects_unsupported_image_type() {
+    let pool = test_pool().await;
+    let app = startup::build_router(pool, Arc::new(mock_ai_runtime()), Arc::new(FailingProvider));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portfolio/import/image/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "file_name":"positions.gif",
+                      "content":"aW1hZ2U=",
+                      "content_encoding":"base64",
+                      "mime_type":"image/gif"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn portfolio_image_preview_rejects_non_base64_content() {
+    let pool = test_pool().await;
+    let app = startup::build_router(pool, Arc::new(mock_ai_runtime()), Arc::new(FailingProvider));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portfolio/import/image/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "file_name":"positions.png",
+                      "content":"not-base64",
+                      "content_encoding":"base64",
+                      "mime_type":"image/png"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn profile_accumulates_from_memos_decisions_and_positions() {
     let pool = test_pool().await;
     let memo = memo::create(

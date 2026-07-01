@@ -11,6 +11,19 @@
 5. 后端将归一化后的 positions 写入 SQLite。
 6. 后端重新计算 market value、unrealized P/L 和 portfolio weights。
 
+## 截图识别预览
+
+Portfolio 页也支持上传或粘贴 PNG、JPG/JPEG、WebP 截图进行识别。截图识别会调用已配置的 Codex CLI provider，把截图中可见的持仓行提取为可编辑草稿。
+
+截图识别第一版只做 preview：
+
+- 不写入 SQLite。
+- 不更新已有持仓。
+- 不创建导入历史。
+- 不触发 market value、unrealized P/L 或 weight 重算。
+
+识别结果需要用户自行核对。截图中的隐藏行、合计行或不可见字段不会被推断。
+
 ## 必填字段
 
 - `symbol`

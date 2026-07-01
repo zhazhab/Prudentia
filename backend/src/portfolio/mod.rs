@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io::Cursor, sync::Arc, time::Duration};
+use std::{collections::HashMap, fs, io::Cursor, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     extract::State,
@@ -9,13 +9,17 @@ use base64::{engine::general_purpose, Engine as _};
 use calamine::{Reader, Xlsx};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use uuid::Uuid;
 
 use crate::{
+    ai::runtime::AiRuntime,
     error::{AppError, AppResult},
     market_data::MarketDataProvider,
     state::AppState,
     time::now_iso,
 };
+
+const MAX_IMAGE_IMPORT_BYTES: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioPosition {
@@ -68,6 +72,43 @@ pub struct PortfolioImportPreview {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct PortfolioImageImportPreviewRequest {
+    pub file_name: String,
+    pub content: String,
+    pub content_encoding: Option<String>,
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioImageDraftRow {
+    pub symbol: String,
+    pub name: String,
+    pub quantity: String,
+    pub average_cost: String,
+    pub currency: String,
+    pub account: Option<String>,
+    pub market: Option<String>,
+    pub sector: Option<String>,
+    pub imported_market_value: Option<String>,
+    pub notes: Option<String>,
+    pub confidence: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioImageRecognition {
+    pub rows: Vec<PortfolioImageDraftRow>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioImageImportPreview {
+    pub rows: Vec<PortfolioImageDraftRow>,
+    pub warnings: Vec<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct PortfolioImportCommitRequest {
     pub file_name: String,
     pub content: String,
@@ -112,6 +153,7 @@ pub struct PriceRefreshResult {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/import/preview", post(preview_import))
+        .route("/import/image/preview", post(preview_image_import_handler))
         .route("/import/commit", post(commit_import_handler))
         .route("/positions", get(list_positions_handler))
         .route("/summary", get(summary_handler))
@@ -143,6 +185,13 @@ async fn preview_import(
     Json(request): Json<PortfolioImportPreviewRequest>,
 ) -> AppResult<Json<PortfolioImportPreview>> {
     Ok(Json(preview(request)?))
+}
+
+async fn preview_image_import_handler(
+    State(state): State<AppState>,
+    Json(request): Json<PortfolioImageImportPreviewRequest>,
+) -> AppResult<Json<PortfolioImageImportPreview>> {
+    Ok(Json(preview_image_import(state.ai.clone(), request).await?))
 }
 
 async fn commit_import_handler(
@@ -196,6 +245,47 @@ pub fn preview(request: PortfolioImportPreviewRequest) -> AppResult<PortfolioImp
         sample_rows,
         suggested_mapping,
         validation_errors,
+    })
+}
+
+pub async fn preview_image_import(
+    ai: Arc<AiRuntime>,
+    request: PortfolioImageImportPreviewRequest,
+) -> AppResult<PortfolioImageImportPreview> {
+    if !matches!(request.content_encoding.as_deref(), Some("base64")) {
+        return Err(AppError::bad_request(
+            "image imports must send content_encoding=base64",
+        ));
+    }
+
+    let extension = supported_image_extension(&request.file_name, request.mime_type.as_deref())
+        .ok_or_else(|| AppError::bad_request("unsupported image type"))?;
+    let bytes = general_purpose::STANDARD.decode(request.content.trim())?;
+    if bytes.is_empty() {
+        return Err(AppError::bad_request("image content is empty"));
+    }
+    if bytes.len() > MAX_IMAGE_IMPORT_BYTES {
+        return Err(AppError::bad_request("image content is too large"));
+    }
+
+    let temp_image = TemporaryImportFile::write("prudentia-portfolio-image", extension, &bytes)?;
+    let recognition = ai
+        .recognize_portfolio_image(&temp_image.path)
+        .await
+        .map_err(|err| AppError::internal(err.to_string()))?;
+    let mut warnings = recognition.warnings;
+    if recognition.rows.is_empty() && warnings.is_empty() {
+        warnings.push("No visible holding rows were recognized.".to_string());
+    }
+
+    Ok(PortfolioImageImportPreview {
+        rows: recognition
+            .rows
+            .into_iter()
+            .map(clean_image_draft_row)
+            .collect(),
+        warnings,
+        source: "codex_cli".to_string(),
     })
 }
 
@@ -696,6 +786,79 @@ fn ratio(value: f64, denominator: f64) -> f64 {
 
 fn normalize_header(value: &str) -> String {
     value.trim().to_lowercase().replace([' ', '_', '-'], "")
+}
+
+fn supported_image_extension(file_name: &str, mime_type: Option<&str>) -> Option<&'static str> {
+    match mime_type.map(|value| value.trim().to_ascii_lowercase()) {
+        Some(value) if value == "image/png" => return Some("png"),
+        Some(value) if value == "image/jpeg" || value == "image/jpg" => return Some("jpg"),
+        Some(value) if value == "image/webp" => return Some("webp"),
+        Some(value) if !value.is_empty() => return None,
+        _ => {}
+    }
+
+    let lower_name = file_name.trim().to_ascii_lowercase();
+    if lower_name.ends_with(".png") {
+        Some("png")
+    } else if lower_name.ends_with(".jpg") || lower_name.ends_with(".jpeg") {
+        Some("jpg")
+    } else if lower_name.ends_with(".webp") {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+fn clean_image_draft_row(mut row: PortfolioImageDraftRow) -> PortfolioImageDraftRow {
+    row.symbol = row.symbol.trim().to_ascii_uppercase();
+    row.name = row.name.trim().to_string();
+    row.quantity = row.quantity.trim().to_string();
+    row.average_cost = row.average_cost.trim().to_string();
+    row.currency = row.currency.trim().to_ascii_uppercase();
+    row.account = clean_optional_string(row.account);
+    row.market = clean_optional_string(row.market);
+    row.sector = clean_optional_string(row.sector);
+    row.imported_market_value = clean_optional_string(row.imported_market_value);
+    row.notes = clean_optional_string(row.notes);
+    row.confidence = match row.confidence.trim().to_ascii_lowercase().as_str() {
+        "high" | "medium" | "low" | "unknown" => row.confidence.trim().to_ascii_lowercase(),
+        _ => "unknown".to_string(),
+    };
+    row.warnings = row
+        .warnings
+        .into_iter()
+        .map(|warning| warning.trim().to_string())
+        .filter(|warning| !warning.is_empty())
+        .collect();
+    row
+}
+
+fn clean_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+struct TemporaryImportFile {
+    path: PathBuf,
+}
+
+impl TemporaryImportFile {
+    fn write(prefix: &str, extension: &str, bytes: &[u8]) -> AppResult<Self> {
+        let file_name = format!("{prefix}-{}.{}", Uuid::new_v4(), extension);
+        let path = std::env::temp_dir().join(file_name);
+        fs::write(&path, bytes)
+            .map_err(|err| AppError::internal(format!("failed to write temporary image: {err}")))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TemporaryImportFile {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path) {
+            tracing::debug!(path = %self.path.display(), error = %error, "temporary image cleanup failed");
+        }
+    }
 }
 
 struct TabularContent {

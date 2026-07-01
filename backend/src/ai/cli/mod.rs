@@ -1,16 +1,22 @@
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     ai::{
         prompt::{
             extract_json_object, investment_system_refinement_prompt, memo_extraction_prompt,
+            portfolio_image_recognition_prompt, portfolio_image_recognition_schema,
             portfolio_review_prompt, research_distillation_prompt, stock_snapshot_prompt,
         },
-        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioReviewContext,
-        ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
+        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioImageRecognition,
+        PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
     locale::Locale,
@@ -68,6 +74,13 @@ impl Default for CliSettings {
 pub trait CliBackend: Clone + Send + Sync + 'static {
     fn kind(&self) -> CliProviderKind;
     fn build_command(&self, settings: &CliSettings, prompt: String) -> CliCommand;
+    fn build_image_command(
+        &self,
+        settings: &CliSettings,
+        image_path: &Path,
+        schema_path: Option<&Path>,
+        prompt: String,
+    ) -> CliCommand;
     fn auth_hint(&self, settings: &CliSettings) -> String;
 }
 
@@ -104,6 +117,20 @@ where
         tokio::task::spawn_blocking(move || run_cli_json(&backend, &settings, prompt))
             .await
             .map_err(|err| AiError::Provider(err.to_string()))?
+    }
+
+    async fn run_image_json<T>(&self, image_path: PathBuf, prompt: String) -> Result<T, AiError>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        let backend = self.backend.clone();
+        let settings = self.settings.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_cli_image_json(&backend, &settings, &image_path, prompt)
+        })
+        .await
+        .map_err(|err| AiError::Provider(err.to_string()))?
     }
 }
 
@@ -150,6 +177,17 @@ where
         self.run_json(portfolio_review_prompt(context, locale))
             .await
     }
+
+    async fn recognize_portfolio_image(
+        &self,
+        image_path: &Path,
+    ) -> Result<PortfolioImageRecognition, AiError> {
+        self.run_image_json(
+            image_path.to_path_buf(),
+            portfolio_image_recognition_prompt(),
+        )
+        .await
+    }
 }
 
 fn run_cli_json<T, B>(backend: &B, settings: &CliSettings, prompt: String) -> Result<T, AiError>
@@ -158,6 +196,38 @@ where
     B: CliBackend,
 {
     let command_spec = backend.build_command(settings, prompt);
+    run_cli_command_json(backend, settings, command_spec)
+}
+
+fn run_cli_image_json<T, B>(
+    backend: &B,
+    settings: &CliSettings,
+    image_path: &Path,
+    prompt: String,
+) -> Result<T, AiError>
+where
+    T: DeserializeOwned,
+    B: CliBackend,
+{
+    let schema_file = TemporaryCliFile::write(
+        "prudentia-portfolio-image-schema",
+        "json",
+        portfolio_image_recognition_schema().as_bytes(),
+    )?;
+    let command_spec =
+        backend.build_image_command(settings, image_path, Some(schema_file.path()), prompt);
+    run_cli_command_json(backend, settings, command_spec)
+}
+
+fn run_cli_command_json<T, B>(
+    backend: &B,
+    settings: &CliSettings,
+    command_spec: CliCommand,
+) -> Result<T, AiError>
+where
+    T: DeserializeOwned,
+    B: CliBackend,
+{
     let output = Command::new(&command_spec.program)
         .args(command_spec.args)
         .output()
@@ -192,6 +262,32 @@ where
             backend.kind().as_str()
         ))
     })
+}
+
+struct TemporaryCliFile {
+    path: PathBuf,
+}
+
+impl TemporaryCliFile {
+    fn write(prefix: &str, extension: &str, bytes: &[u8]) -> Result<Self, AiError> {
+        let file_name = format!("{prefix}-{}.{}", Uuid::new_v4(), extension);
+        let path = std::env::temp_dir().join(file_name);
+        fs::write(&path, bytes)
+            .map_err(|err| AiError::Provider(format!("failed to write temporary file: {err}")))?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryCliFile {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path) {
+            tracing::debug!(path = %self.path.display(), error = %error, "temporary CLI file cleanup failed");
+        }
+    }
 }
 
 pub mod codex;

@@ -11,6 +11,19 @@ The first import flow is:
 5. Backend commits normalized positions into SQLite.
 6. Backend recomputes market value, unrealized P/L, and portfolio weights.
 
+## Screenshot Recognition Preview
+
+The Portfolio page also supports uploaded or pasted PNG, JPG/JPEG, and WebP screenshots. Screenshot recognition uses the configured Codex CLI provider to extract visible holding rows into editable draft rows.
+
+The first screenshot recognition version is preview-only:
+
+- It does not write to SQLite.
+- It does not update existing positions.
+- It does not create import history.
+- It does not recompute market value, unrealized P/L, or weight.
+
+Users must verify recognized rows manually. Hidden rows, totals, and fields that are not visible in the screenshot are not inferred.
+
 ## Required Fields
 
 - `symbol`

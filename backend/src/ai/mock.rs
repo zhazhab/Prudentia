@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use async_trait::async_trait;
 
 use crate::{
@@ -8,6 +10,7 @@ use crate::{
     investment_system::InvestmentSystem,
     locale::Locale,
     memo::Memo,
+    portfolio::{PortfolioImageDraftRow, PortfolioImageRecognition},
 };
 
 pub struct MockAiProvider;
@@ -167,6 +170,29 @@ impl AiProvider for MockAiProvider {
         };
 
         Ok(mock_research_analysis(locale, summary))
+    }
+
+    async fn recognize_portfolio_image(
+        &self,
+        _image_path: &Path,
+    ) -> Result<PortfolioImageRecognition, AiError> {
+        Ok(PortfolioImageRecognition {
+            rows: vec![PortfolioImageDraftRow {
+                symbol: "AAPL".to_string(),
+                name: "Apple Inc.".to_string(),
+                quantity: "12".to_string(),
+                average_cost: "150.25".to_string(),
+                currency: "USD".to_string(),
+                account: Some("Main".to_string()),
+                market: Some("US".to_string()),
+                sector: None,
+                imported_market_value: Some("2450.00".to_string()),
+                notes: Some("Recognized from mock image provider.".to_string()),
+                confidence: "high".to_string(),
+                warnings: Vec::new(),
+            }],
+            warnings: vec!["Mock image recognition preview.".to_string()],
+        })
     }
 }
 
