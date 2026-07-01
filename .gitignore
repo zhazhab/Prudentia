@@ -35,5 +35,5 @@ npm-debug.log*
 *.sqlite3
 data/
 
-# Local planning artifacts
+# Local planning and process docs
 docs/superpowers/
