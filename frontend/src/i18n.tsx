@@ -251,13 +251,14 @@ const translations = {
     "settings.cliPath": "CLI path",
     "settings.cliModel": "CLI model override",
     "settings.cliProfile": "CLI profile",
+    "settings.cliAdvanced": "Advanced CLI options",
     "settings.cliLoginCommand": "CLI login command",
     "settings.cliHelp": "For Codex, run this in a terminal once, finish the browser/device-code flow, then choose CLI as the provider.",
-    "settings.persist": "Write these settings to .env",
     "settings.save": "Save AI settings",
     "settings.saved": "Settings saved",
-    "settings.envNote": "Runtime settings take effect immediately. Writing .env makes them survive a backend restart.",
-    "settings.mockNote": "Mock mode stays fully local and deterministic.",
+    "settings.mockNote": "Mock mode stays fully local and deterministic. Saving writes the selected provider to .env.",
+    "settings.openaiNote": "Use an OpenAI-compatible chat completions endpoint. Saving persists these provider settings to .env.",
+    "settings.cliNote": "Use Codex CLI authentication from this machine. Saving persists these CLI provider settings to .env.",
   },
   zh: {
     "app.subtitle": "投资操作系统",
@@ -442,12 +443,13 @@ const translations = {
     "settings.cliPath": "CLI 路径",
     "settings.cliModel": "CLI 模型覆盖",
     "settings.cliProfile": "CLI profile",
+    "settings.cliAdvanced": "CLI 高级选项",
     "settings.cliLoginCommand": "CLI 登录命令",
     "settings.cliHelp": "如果使用 Codex，先在终端运行一次该命令，完成浏览器/device-code 登录，再选择 CLI provider。",
-    "settings.persist": "写入 .env 持久化",
     "settings.save": "保存 AI 设置",
     "settings.saved": "设置已保存",
-    "settings.envNote": "运行时设置会立即生效。写入 .env 后，后端重启仍会保留。",
-    "settings.mockNote": "Mock 模式完全本地、确定性输出。"
+    "settings.mockNote": "Mock 模式完全本地、确定性输出。保存后会把当前 provider 写入 .env。",
+    "settings.openaiNote": "使用 OpenAI-compatible chat completions endpoint。保存后会把这些 provider 设置持久化到 .env。",
+    "settings.cliNote": "使用本机 Codex CLI 的登录态。保存后会把这些 CLI provider 设置持久化到 .env。"
   }
 } as const;

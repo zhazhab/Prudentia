@@ -6,6 +6,7 @@ All notable changes to Prudentia should be recorded here. Add the newest entry a
 
 ## Unreleased
 
+- Improved Settings AI provider setup so only the selected provider's required fields are shown, and saving now always persists provider settings to `.env`.
 - Added the Research Library with article/person investment-thought distillation, stock snapshot analysis, portfolio reviews, and adoption of candidate principles/checklist items into the investment system.
 - Added repository name explanation, vision, ideal goals, and planned capabilities to the README.
 - Split bilingual documentation into separate files: Simplified Chinese stays in `.md`, and English uses `.en.md`.

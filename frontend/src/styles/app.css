@@ -591,6 +591,25 @@ textarea:focus {
   line-height: 1.5;
 }
 
+.settings-advanced {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #d7dbd2;
+  border-radius: 8px;
+}
+
+.settings-advanced summary {
+  cursor: pointer;
+  color: #29352f;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.settings-advanced[open] summary {
+  margin-bottom: 12px;
+}
+
 .checkbox-row {
   display: flex;
   align-items: center;
