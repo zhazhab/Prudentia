@@ -7,6 +7,8 @@ import type {
   DistillResearchRequest,
   Memo,
   MemoExtraction,
+  PortfolioDraftCommitRequest,
+  PortfolioDraftPreview,
   PortfolioImageImportPreview,
   PortfolioImportMapping,
   PortfolioImportPreview,
@@ -16,7 +18,8 @@ import type {
   PriceRefreshResult,
   ResearchRecord,
   StockSnapshotRequest,
-  UpdateAiSettings
+  UpdateAiSettings,
+  UpdatePortfolioPosition
 } from "../types/domain";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -126,8 +129,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  draftPortfolioImport: (payload: FilePayload & { mapping: PortfolioImportMapping }) =>
+    request<PortfolioDraftPreview>("/api/portfolio/import/draft", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   previewPortfolioImageImport: (payload: ImagePayload) =>
     request<PortfolioImageImportPreview>("/api/portfolio/import/image/preview", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  commitPortfolioDraft: (payload: PortfolioDraftCommitRequest) =>
+    request<PortfolioImportResult>("/api/portfolio/import/draft/commit", {
       method: "POST",
       body: JSON.stringify(payload)
     }),
@@ -135,6 +148,15 @@ export const api = {
     request<PortfolioImportResult>("/api/portfolio/import/commit", {
       method: "POST",
       body: JSON.stringify(payload)
+    }),
+  updatePosition: (symbol: string, payload: UpdatePortfolioPosition) =>
+    request<PortfolioPosition>(`/api/portfolio/positions/${encodeURIComponent(symbol)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deletePosition: (symbol: string) =>
+    request<PortfolioPosition[]>(`/api/portfolio/positions/${encodeURIComponent(symbol)}`, {
+      method: "DELETE"
     }),
   refreshPrices: () =>
     request<PriceRefreshResult>("/api/portfolio/prices/refresh", { method: "POST" }),

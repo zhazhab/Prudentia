@@ -184,11 +184,37 @@ button {
   background: #285d61;
 }
 
+.primary-button:disabled,
+.ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.54;
+}
+
 .ghost-button {
   padding: 0 10px;
   color: #2f514f;
   border-color: #ced8d1;
   background: #ffffff;
+}
+
+.icon-button {
+  display: inline-grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #ced8d1;
+  border-radius: 8px;
+  color: #2f514f;
+  background: #ffffff;
+}
+
+.icon-button:hover {
+  border-color: #aebfb5;
+  background: #f7faf5;
+}
+
+.icon-button.danger {
+  color: #8f3f4d;
 }
 
 .file-button {
@@ -676,6 +702,32 @@ textarea:focus {
 
 .icon-text-button {
   max-width: 220px;
+}
+
+.fit-button {
+  width: fit-content;
+}
+
+.import-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.market-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.row-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.edit-position-panel {
+  display: grid;
+  gap: 14px;
 }
 
 .mapping-grid {

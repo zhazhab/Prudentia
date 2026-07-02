@@ -310,6 +310,13 @@ mod tests {
             price_stale_count: 0,
             top_positions: Vec::new(),
             sectors: Vec::new(),
+            market_groups: Vec::new(),
+            base_currency: "CNY".to_string(),
+            total_market_value_base: 0.0,
+            total_cost_base: 0.0,
+            total_unrealized_pnl_base: 0.0,
+            fx_rates: Vec::new(),
+            fx_stale_count: 0,
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
     }

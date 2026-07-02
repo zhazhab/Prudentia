@@ -88,6 +88,21 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     pool.execute(
         r#"
+        CREATE TABLE IF NOT EXISTS portfolio_fx_rates (
+            from_currency TEXT NOT NULL,
+            to_currency TEXT NOT NULL,
+            rate REAL NOT NULL,
+            source TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            stale INTEGER NOT NULL,
+            PRIMARY KEY(from_currency, to_currency)
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
         CREATE TABLE IF NOT EXISTS decisions (
             id TEXT PRIMARY KEY,
             memo_id TEXT,

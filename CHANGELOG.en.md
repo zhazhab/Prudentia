@@ -6,7 +6,7 @@ All notable changes to Prudentia should be recorded here. Add the newest entry a
 
 ## Unreleased
 
-- Added Portfolio screenshot recognition preview: upload or paste a holdings screenshot and use the Codex CLI provider to extract editable draft rows without writing to the portfolio database.
+- Polished the Portfolio holdings workflow: CSV/Excel/screenshot inputs now share one editable draft table, confirmed drafts merge-upsert by `symbol`, positions can be edited/deleted, US/HK/CN markets are inferred, summaries use a CNY base view, and market data providers refresh FX with stale fallback.
 - Added the Research Library with article/person investment-thought distillation, stock snapshot analysis, portfolio reviews, and adoption of candidate principles/checklist items into the investment system.
 - Added repository name explanation, vision, ideal goals, and planned capabilities to the README.
 - Split bilingual documentation into separate files: Simplified Chinese stays in `.md`, and English uses `.en.md`.
