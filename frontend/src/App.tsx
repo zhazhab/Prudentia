@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AppShell, type ViewKey } from "./components/AppShell";
 import { DashboardPage } from "./pages/DashboardPage";
+import { DecisionTimelinePage } from "./pages/DecisionTimelinePage";
 import { InvestmentSystemPage } from "./pages/InvestmentSystemPage";
 import { MemosPage } from "./pages/MemosPage";
 import { PortfolioPage } from "./pages/PortfolioPage";
@@ -15,6 +16,7 @@ export default function App() {
     <AppShell activeView={activeView} onViewChange={setActiveView}>
       {activeView === "dashboard" ? <DashboardPage onNavigate={setActiveView} /> : null}
       {activeView === "portfolio" ? <PortfolioPage /> : null}
+      {activeView === "decision-deltas" ? <DecisionTimelinePage /> : null}
       {activeView === "memos" ? <MemosPage /> : null}
       {activeView === "research" ? <ResearchPage /> : null}
       {activeView === "system" ? <InvestmentSystemPage /> : null}

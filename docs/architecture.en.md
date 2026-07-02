@@ -23,6 +23,7 @@ Engineering style is documented in [engineering-style.en.md](engineering-style.e
 - `portfolio`: import preview, mapping, commit, position calculations, summaries, and refresh orchestration.
 - `market_data`: quote provider trait with mock and Alpha Vantage-compatible implementations.
 - `decision`: explicit investment decision events.
+- `decision_delta`: actual legs and baseline shadow legs for quantifiable decisions, with daily/manual snapshots, stale fallback, reviews, and candidate adoption.
 - `profile`: rule-driven XP, levels, attributes, badges, and bias signals.
 - `ai`: provider trait with mock, OpenAI-compatible, and CLI-backed implementations.
 - `settings`: runtime AI provider configuration with optional `.env` persistence.
@@ -30,6 +31,8 @@ Engineering style is documented in [engineering-style.en.md](engineering-style.e
 ## Local-First Defaults
 
 SQLite is the first persistence layer. There is no login, multi-user authorization, or broker API sync in v1. Portfolio quantity and average cost come from import/manual updates; automatic updates only refresh prices and derived values.
+
+Decision Delta v1 does not build an unbounded world tree. Each quantifiable decision creates one actual/baseline fork, then snapshots preserve how that fork performs on later dates. The timeline summary is the sum of latest `actual_value - baseline_value` snapshots in the current filter scope, not a full counterfactual portfolio NAV.
 
 ## Extension Points
 

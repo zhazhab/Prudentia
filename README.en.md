@@ -19,8 +19,9 @@ In the ideal state, users can build their own investment system in Prudentia and
 ## Current Capabilities
 
 - Rust backend with `axum`, `sqlx`, SQLite, provider-based AI, and provider-based market data.
-- React + Vite + TypeScript frontend with Dashboard, Portfolio, Memos, Investment System, and Profile views.
+- React + Vite + TypeScript frontend with Dashboard, Portfolio, Decision Deltas, Memos, Investment System, and Profile views.
 - Portfolio CSV/Excel/screenshot unified draft import, field mapping, confirmed merge commit, position edit/delete, value/weight/P/L calculations, CNY base summary, and scheduled quote + FX refresh.
+- Decision Deltas turn quantified decisions into actual legs plus baseline shadow legs, refresh market-data snapshots, and show portfolio return differences, one-fork comparisons, and review candidate adoption.
 - Research Library for article/person investment-thought distillation, stock snapshot analysis, portfolio reviews, and adopting candidate principles/checklist items into the investment system.
 - Rule-driven profile XP, levels, badges, attributes, and bias signals.
 - English and Simplified Chinese UI, with `Accept-Language` passed to backend-generated system text.
@@ -30,7 +31,7 @@ In the ideal state, users can build their own investment system in Prudentia and
 - A fuller memo lifecycle: watch, buy, add, trim, sell, review, and archive.
 - Stronger portfolio import flows: saved mappings, duplicate import handling, and account/market/sector analysis.
 - More market data, AI, and CLI providers behind clean replacement interfaces.
-- Decision review reminders that turn review dates and thesis horizons into an actionable workflow.
+- Decision review reminders that turn review dates, decision-delta snapshots, and thesis horizons into an actionable workflow.
 - Expanded investor profile rules so XP, attributes, badges, and bias signals better reflect the user's investment process.
 - Reserved broker and transaction sync interfaces while keeping local-first storage and replaceable provider boundaries.
 - Exportable investment systems, memos, and review reports for long-term archiving and sharing.

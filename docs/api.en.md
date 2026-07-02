@@ -173,17 +173,76 @@ The market data provider refreshes both quotes and FX. The Alpha Vantage provide
 
 ## Decisions
 
+- `GET /api/decisions/`
 - `POST /api/decisions/`
+- `GET /api/decisions/{id}`
 
 ```json
 {
   "memo_id": "optional-memo-id",
   "symbol": "AAPL",
-  "action": "watch",
-  "rationale": "Waiting for a better risk/reward entry.",
+  "action": "buy",
+  "rationale": "Services mix is improving.",
   "confidence": 0.65,
   "expected_outcome": "Track margin and services mix.",
-  "review_date": "2026-09-30"
+  "review_date": "2026-09-30",
+  "decision_date": "2026-07-03",
+  "quantity": 10,
+  "notional": 1000,
+  "price": 100,
+  "currency": "CNY",
+  "baseline_type": "cash",
+  "hypothetical_notional": null
+}
+```
+
+`quantity` / `notional` / `price` / `currency` / `baseline_type` / `hypothetical_notional` are optional quantification fields. When provided, the backend creates decision delta legs for supported actions:
+
+- `buy` / `add`: actual is the asset exposure; baseline defaults to cash.
+- `sell` / `trim`: actual is cash; baseline defaults to continued holding.
+- `watch` / `skip`: quantified only when `hypothetical_notional` is provided; actual is cash kept, baseline defaults to hypothetical buy.
+
+## Decision Deltas
+
+- `GET /api/decision-deltas/timeline`
+- `GET /api/decision-deltas/timeline?symbol=AAPL&delta=positive&sort=absolute_delta`
+- `GET /api/decision-deltas/{decision_id}`
+- `GET /api/decision-deltas/{decision_id}?snapshot_limit=30`
+- `POST /api/decision-deltas/refresh`
+- `PATCH /api/decision-deltas/{decision_id}/review`
+- `POST /api/decision-deltas/{decision_id}/adopt`
+
+Refresh selected decisions, or omit `decision_ids` to refresh all quantifiable decisions:
+
+```json
+{
+  "decision_ids": ["decision-id"]
+}
+```
+
+The timeline returns the latest snapshot for each decision in the current filter scope. Its summary label is `sum_of_decision_deltas`: the sum of latest `actual_value - baseline_value`, not a full counterfactual portfolio NAV.
+
+Decision detail returns the latest 90 snapshots by default. Use `snapshot_limit` to adjust the returned history; the maximum is 365, and invalid values fall back to the default. `latest_snapshot` is always returned separately.
+
+Save a review:
+
+```json
+{
+  "notes": "Good process, not just good outcome.",
+  "thesis_evidence": ["Services margin expanded."],
+  "disconfirming_evidence": ["Hardware cycle softened."],
+  "lessons": ["Size slowly when baseline is cash."],
+  "candidate_principles": ["Measure decision deltas before celebrating."],
+  "candidate_checklist_items": ["What is the no-action baseline?"]
+}
+```
+
+Adopt review candidates into the investment system:
+
+```json
+{
+  "principles": ["Measure decision deltas before celebrating."],
+  "checklist_items": ["What is the no-action baseline?"]
 }
 ```
 
@@ -191,7 +250,7 @@ The market data provider refreshes both quotes and FX. The Alpha Vantage provide
 
 - `GET /api/profile`
 
-The profile is calculated from memos, decisions, and portfolio state. It is intentionally rule-driven in v1.
+The profile is calculated from memos, decisions, decision delta reviews, and portfolio state. It is intentionally rule-driven in v1 and rewards review process rather than positive return outcomes.
 
 ## Settings
 

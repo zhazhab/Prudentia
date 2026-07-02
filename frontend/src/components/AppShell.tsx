@@ -4,6 +4,7 @@ import {
   BookOpenText,
   ClipboardList,
   Compass,
+  GitFork,
   LayoutDashboard,
   Library,
   Settings,
@@ -14,6 +15,7 @@ import { useI18n, type Locale } from "../i18n";
 export type ViewKey =
   | "dashboard"
   | "portfolio"
+  | "decision-deltas"
   | "memos"
   | "research"
   | "system"
@@ -29,6 +31,7 @@ interface AppShellProps {
 const navItems = [
   { key: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
   { key: "portfolio", labelKey: "nav.portfolio", icon: BarChart3 },
+  { key: "decision-deltas", labelKey: "nav.decisionDeltas", icon: GitFork },
   { key: "memos", labelKey: "nav.memos", icon: BookOpenText },
   { key: "research", labelKey: "nav.research", icon: Library },
   { key: "system", labelKey: "nav.system", icon: ClipboardList },

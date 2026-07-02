@@ -3,7 +3,14 @@ import type {
   InvestmentSystemRefinement,
   InvestorProfile,
   AdoptResearchCandidatesRequest,
+  AdoptDecisionDeltaCandidatesRequest,
   AiSettings,
+  Decision,
+  DecisionDeltaDetail,
+  DecisionDeltaReview,
+  DecisionDeltaReviewRequest,
+  DecisionDeltaTimeline,
+  DecisionDeltaTimelineFilters,
   DistillResearchRequest,
   Memo,
   MemoExtraction,
@@ -17,6 +24,7 @@ import type {
   PortfolioSummary,
   PriceRefreshResult,
   ResearchRecord,
+  RefreshDecisionDeltasResult,
   StockSnapshotRequest,
   UpdateAiSettings,
   UpdatePortfolioPosition
@@ -83,6 +91,41 @@ export const api = {
     }),
   extractMemo: (id: string, languageTag?: string) =>
     request<MemoExtraction>(`/api/memos/${id}/ai/extract`, { method: "POST", languageTag }),
+  decisions: () => request<Decision[]>("/api/decisions/"),
+  decision: (id: string) => request<Decision>(`/api/decisions/${id}`),
+  decisionDeltaTimeline: (params: DecisionDeltaTimelineFilters = {}) =>
+    request<DecisionDeltaTimeline>(`/api/decision-deltas/timeline${queryString({ ...params })}`),
+  decisionDeltaDetail: (id: string, snapshotLimit?: number) =>
+    request<DecisionDeltaDetail>(
+      `/api/decision-deltas/${id}${queryString({
+        snapshot_limit: snapshotLimit == null ? undefined : String(snapshotLimit)
+      })}`
+    ),
+  refreshDecisionDeltas: (decisionIds?: string[]) =>
+    request<RefreshDecisionDeltasResult>("/api/decision-deltas/refresh", {
+      method: "POST",
+      body: JSON.stringify({ decision_ids: decisionIds })
+    }),
+  saveDecisionDeltaReview: (
+    id: string,
+    payload: DecisionDeltaReviewRequest,
+    languageTag?: string
+  ) =>
+    request<DecisionDeltaReview>(`/api/decision-deltas/${id}/review`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      languageTag
+    }),
+  adoptDecisionDeltaCandidates: (
+    id: string,
+    payload: AdoptDecisionDeltaCandidatesRequest,
+    languageTag?: string
+  ) =>
+    request<InvestmentSystem>(`/api/decision-deltas/${id}/adopt`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      languageTag
+    }),
   investmentSystem: (languageTag?: string) =>
     request<InvestmentSystem>("/api/investment-system/", { languageTag }),
   updateInvestmentSystem: (payload: Partial<InvestmentSystem>) =>
