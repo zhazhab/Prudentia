@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
 use axum::{
@@ -25,7 +28,7 @@ use prudentia_backend::{
     },
     profile, research, startup,
 };
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use tower::ServiceExt;
 
 async fn test_pool() -> SqlitePool {
@@ -38,6 +41,27 @@ async fn test_pool() -> SqlitePool {
     pool
 }
 
+#[tokio::test]
+async fn decision_delta_migration_creates_timeline_indexes() {
+    let pool = test_pool().await;
+
+    assert!(index_names(&pool, "decision_delta_legs")
+        .await
+        .contains(&"idx_decision_delta_legs_decision_kind".to_string()));
+    assert!(index_names(&pool, "decision_delta_snapshots")
+        .await
+        .contains(&"idx_decision_delta_snapshots_latest".to_string()));
+    assert!(index_names(&pool, "decisions")
+        .await
+        .contains(&"idx_decisions_symbol".to_string()));
+    assert!(index_names(&pool, "decisions")
+        .await
+        .contains(&"idx_decisions_action".to_string()));
+    assert!(index_names(&pool, "decisions")
+        .await
+        .contains(&"idx_decisions_created_at".to_string()));
+}
+
 fn sample_import_content() -> String {
     [
         "symbol,name,quantity,average cost,currency,sector,market value",
@@ -45,6 +69,53 @@ fn sample_import_content() -> String {
         "MSFT,Microsoft,1,200,USD,Technology,220",
     ]
     .join("\n")
+}
+
+async fn index_names(pool: &SqlitePool, table: &str) -> Vec<String> {
+    let escaped_table = table.replace('\'', "''");
+    let rows = sqlx::query(&format!("PRAGMA index_list('{escaped_table}')"))
+        .fetch_all(pool)
+        .await
+        .expect("index list");
+    rows.into_iter()
+        .map(|row| row.try_get::<String, _>("name").expect("index name"))
+        .collect()
+}
+
+async fn seed_decision_delta_snapshots(pool: &SqlitePool, decision_id: &str, count: usize) {
+    for index in 0..count {
+        let created_at = format!("2026-01-01T00:00:00.{index:03}Z");
+        sqlx::query(
+            r#"
+            INSERT INTO decision_delta_snapshots (
+                id, decision_id, as_of_date, actual_value, baseline_value, delta_value,
+                delta_pct, portfolio_impact_pct, price_used, price_source, price_updated_at,
+                fx_rate_used, fx_source, fx_updated_at, price_stale, fx_stale, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(format!("snapshot-{index:03}"))
+        .bind(decision_id)
+        .bind(&created_at)
+        .bind(1000.0 + index as f64)
+        .bind(1000.0)
+        .bind(index as f64)
+        .bind(Some(index as f64 / 1000.0))
+        .bind(None::<f64>)
+        .bind(Some(100.0 + index as f64))
+        .bind(Some("seed-test"))
+        .bind(Some(created_at.clone()))
+        .bind(Some(1.0))
+        .bind(Some("identity"))
+        .bind(Some(created_at.clone()))
+        .bind(false)
+        .bind(false)
+        .bind(&created_at)
+        .execute(pool)
+        .await
+        .expect("insert snapshot");
+    }
 }
 
 #[tokio::test]
@@ -267,6 +338,147 @@ async fn decision_delta_non_base_currency_uses_fx() {
     assert_eq!(latest.baseline_value, 7000.0);
     assert_eq!(latest.delta_value, 1400.0);
     assert_eq!(latest.fx_rate_used, Some(7.0));
+}
+
+#[tokio::test]
+async fn decision_delta_detail_limits_snapshot_history_by_default_and_query() {
+    let pool = test_pool().await;
+    let decision = quantified_decision(&pool, "buy", "AAPL", Some(10.0), None, 100.0).await;
+    seed_decision_delta_snapshots(&pool, &decision.id, 120).await;
+
+    let app = startup::build_router(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(StaticCnyProvider {
+            price: 100.0,
+            fail: false,
+        }),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/decision-deltas/{}", decision.id))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let detail: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(detail["snapshots"].as_array().expect("snapshots").len(), 90);
+    assert_eq!(detail["latest_snapshot"]["delta_value"], 119.0);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/decision-deltas/{}?snapshot_limit=30",
+                    decision.id
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let detail: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(detail["snapshots"].as_array().expect("snapshots").len(), 30);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/api/decision-deltas/{}?snapshot_limit=999",
+                    decision.id
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let detail: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(
+        detail["snapshots"].as_array().expect("snapshots").len(),
+        120
+    );
+}
+
+#[tokio::test]
+async fn decision_delta_refresh_reuses_quotes_and_fx_within_batch() {
+    let pool = test_pool().await;
+    let first = decision::create(
+        &pool,
+        CreateDecisionRequest {
+            memo_id: None,
+            symbol: Some("AAPL".to_string()),
+            action: "buy".to_string(),
+            rationale: "First USD decision.".to_string(),
+            confidence: 0.7,
+            expected_outcome: "Track delta.".to_string(),
+            review_date: Some("2026-09-30".to_string()),
+            decision_date: Some("2026-01-01".to_string()),
+            quantity: Some(10.0),
+            notional: Some(1000.0),
+            price: Some(100.0),
+            currency: Some("USD".to_string()),
+            baseline_type: None,
+            hypothetical_notional: None,
+        },
+    )
+    .await
+    .expect("first decision");
+    let second = decision::create(
+        &pool,
+        CreateDecisionRequest {
+            memo_id: None,
+            symbol: Some("AAPL".to_string()),
+            action: "buy".to_string(),
+            rationale: "Second USD decision.".to_string(),
+            confidence: 0.7,
+            expected_outcome: "Track delta.".to_string(),
+            review_date: Some("2026-09-30".to_string()),
+            decision_date: Some("2026-01-01".to_string()),
+            quantity: Some(5.0),
+            notional: Some(500.0),
+            price: Some(100.0),
+            currency: Some("USD".to_string()),
+            baseline_type: None,
+            hypothetical_notional: None,
+        },
+    )
+    .await
+    .expect("second decision");
+    let provider = Arc::new(CountingFxProvider::new());
+
+    let result = decision_delta::refresh(
+        &pool,
+        provider.clone(),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![first.id, second.id]),
+        },
+    )
+    .await
+    .expect("refresh");
+
+    assert_eq!(result.refreshed, 2);
+    assert_eq!(provider.quote_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.fx_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1927,6 +2139,56 @@ impl MarketDataProvider for StaticFxQuoteProvider {
                 self.fx_rate
             },
             source: "static-fx-test".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
+    }
+}
+
+struct CountingFxProvider {
+    quote_calls: AtomicUsize,
+    fx_calls: AtomicUsize,
+}
+
+impl CountingFxProvider {
+    fn new() -> Self {
+        Self {
+            quote_calls: AtomicUsize::new(0),
+            fx_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl MarketDataProvider for CountingFxProvider {
+    async fn quote(&self, symbol: &str) -> Result<MarketQuote, MarketDataError> {
+        self.quote_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(MarketQuote {
+            symbol: symbol.to_uppercase(),
+            price: 120.0,
+            currency: Some("USD".to_string()),
+            volume: None,
+            source: "counting-test".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
+    }
+
+    async fn exchange_rate(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        if !from_currency.eq_ignore_ascii_case(to_currency) {
+            self.fx_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(ExchangeRate {
+            from_currency: from_currency.to_ascii_uppercase(),
+            to_currency: to_currency.to_ascii_uppercase(),
+            rate: if from_currency.eq_ignore_ascii_case(to_currency) {
+                1.0
+            } else {
+                7.0
+            },
+            source: "counting-test".to_string(),
             updated_at: "2026-01-02T00:00:00Z".to_string(),
         })
     }

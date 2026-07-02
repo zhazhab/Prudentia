@@ -207,6 +207,7 @@ The market data provider refreshes both quotes and FX. The Alpha Vantage provide
 - `GET /api/decision-deltas/timeline`
 - `GET /api/decision-deltas/timeline?symbol=AAPL&delta=positive&sort=absolute_delta`
 - `GET /api/decision-deltas/{decision_id}`
+- `GET /api/decision-deltas/{decision_id}?snapshot_limit=30`
 - `POST /api/decision-deltas/refresh`
 - `PATCH /api/decision-deltas/{decision_id}/review`
 - `POST /api/decision-deltas/{decision_id}/adopt`
@@ -220,6 +221,8 @@ Refresh selected decisions, or omit `decision_ids` to refresh all quantifiable d
 ```
 
 The timeline returns the latest snapshot for each decision in the current filter scope. Its summary label is `sum_of_decision_deltas`: the sum of latest `actual_value - baseline_value`, not a full counterfactual portfolio NAV.
+
+Decision detail returns the latest 90 snapshots by default. Use `snapshot_limit` to adjust the returned history; the maximum is 365, and invalid values fall back to the default. `latest_snapshot` is always returned separately.
 
 Save a review:
 

@@ -85,6 +85,10 @@ export function formatDecisionDeltaPercent(value?: number | null) {
   return `${sign}${(value * 100).toFixed(1)}%`;
 }
 
+export function snapshotHistoryLimitLabel(limit: number) {
+  return `Latest ${limit} snapshots`;
+}
+
 export function comparisonKindForAction(action: string): DecisionComparisonKind {
   switch (action.trim().toLowerCase()) {
     case "buy":

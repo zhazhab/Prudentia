@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
@@ -15,13 +15,15 @@ use crate::{
     error::{AppError, AppResult},
     investment_system::{self, InvestmentSystem, UpdateInvestmentSystemRequest},
     locale::Locale,
-    market_data::MarketDataProvider,
+    market_data::{ExchangeRate, MarketDataProvider, MarketQuote},
     portfolio,
     state::AppState,
     time::now_iso,
 };
 
 const BASE_CURRENCY: &str = "CNY";
+const DEFAULT_SNAPSHOT_LIMIT: usize = 90;
+const MAX_SNAPSHOT_LIMIT: usize = 365;
 
 #[derive(Debug, Clone)]
 pub struct DecisionDeltaInput {
@@ -131,6 +133,11 @@ pub struct DecisionDeltaTimelineQuery {
     pub sort: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct DecisionDeltaDetailQuery {
+    snapshot_limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RefreshDecisionDeltasRequest {
     pub decision_ids: Option<Vec<String>>,
@@ -187,8 +194,16 @@ async fn refresh_handler(
 async fn detail_handler(
     State(state): State<AppState>,
     Path(decision_id): Path<String>,
+    Query(query): Query<DecisionDeltaDetailQuery>,
 ) -> AppResult<Json<DecisionDeltaDetail>> {
-    Ok(Json(get_detail(&state.pool, &decision_id).await?))
+    Ok(Json(
+        get_detail_with_limit(
+            &state.pool,
+            &decision_id,
+            snapshot_limit(query.snapshot_limit),
+        )
+        .await?,
+    ))
 }
 
 async fn save_review_handler(
@@ -229,10 +244,18 @@ pub async fn create_legs_for_decision(
 }
 
 pub async fn get_detail(pool: &SqlitePool, decision_id: &str) -> AppResult<DecisionDeltaDetail> {
+    get_detail_with_limit(pool, decision_id, DEFAULT_SNAPSHOT_LIMIT).await
+}
+
+async fn get_detail_with_limit(
+    pool: &SqlitePool,
+    decision_id: &str,
+    snapshot_limit: usize,
+) -> AppResult<DecisionDeltaDetail> {
     let decision = decision::get(pool, decision_id).await?;
     let legs = list_legs(pool, decision_id).await?;
-    let snapshots = list_snapshots(pool, decision_id).await?;
-    let latest_snapshot = snapshots.first().cloned();
+    let latest_snapshot = latest_snapshot(pool, decision_id).await?;
+    let snapshots = list_snapshots(pool, decision_id, snapshot_limit).await?;
     let review = get_review_optional(pool, decision_id).await?;
 
     Ok(DecisionDeltaDetail {
@@ -260,9 +283,20 @@ pub async fn refresh(
         failed: 0,
         failures: Vec::new(),
     };
+    if decision_ids.is_empty() {
+        return Ok(result);
+    }
+
+    let portfolio_summary = portfolio::summary(pool).await?;
+    let mut context = RefreshContext::new(market_data, portfolio_summary.total_market_value_base);
+    let legs_by_decision = list_legs_for_decisions(pool, &decision_ids).await?;
 
     for decision_id in decision_ids {
-        match calculate_snapshot(pool, market_data.clone(), &decision_id).await {
+        let legs = legs_by_decision
+            .get(&decision_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        match calculate_snapshot(&mut context, &decision_id, legs).await {
             Ok(snapshot) => {
                 insert_snapshot(pool, &snapshot).await?;
                 result.refreshed += 1;
@@ -613,12 +647,79 @@ async fn insert_leg(pool: &SqlitePool, leg: &DecisionDeltaLeg) -> AppResult<()> 
     Ok(())
 }
 
-async fn calculate_snapshot(
-    pool: &SqlitePool,
+struct RefreshContext {
     market_data: Arc<dyn MarketDataProvider>,
+    total_market_value_base: f64,
+    quotes: HashMap<String, Result<MarketQuote, String>>,
+    fx_rates: HashMap<String, Result<ExchangeRate, String>>,
+}
+
+impl RefreshContext {
+    fn new(market_data: Arc<dyn MarketDataProvider>, total_market_value_base: f64) -> Self {
+        Self {
+            market_data,
+            total_market_value_base,
+            quotes: HashMap::new(),
+            fx_rates: HashMap::new(),
+        }
+    }
+
+    async fn quote(&mut self, symbol: &str) -> AppResult<MarketQuote> {
+        let key = symbol.trim().to_ascii_uppercase();
+        if !self.quotes.contains_key(&key) {
+            let result = self
+                .market_data
+                .quote(&key)
+                .await
+                .map_err(|error| error.to_string());
+            self.quotes.insert(key.clone(), result);
+        }
+        self.quotes
+            .get(&key)
+            .expect("quote cache entry")
+            .clone()
+            .map_err(AppError::internal)
+    }
+
+    async fn exchange_rate(&mut self, from_currency: &str) -> AppResult<FxValue> {
+        if from_currency.eq_ignore_ascii_case(BASE_CURRENCY) {
+            return Ok(FxValue {
+                rate: 1.0,
+                source: Some("identity".to_string()),
+                updated_at: Some(now_iso()),
+            });
+        }
+
+        let from_currency = from_currency.trim().to_ascii_uppercase();
+        let key = format!("{from_currency}->{BASE_CURRENCY}");
+        if !self.fx_rates.contains_key(&key) {
+            let result = self
+                .market_data
+                .exchange_rate(&from_currency, BASE_CURRENCY)
+                .await
+                .map_err(|error| error.to_string());
+            self.fx_rates.insert(key.clone(), result);
+        }
+
+        let rate = self
+            .fx_rates
+            .get(&key)
+            .expect("fx cache entry")
+            .clone()
+            .map_err(AppError::internal)?;
+        Ok(FxValue {
+            rate: rate.rate,
+            source: Some(rate.source),
+            updated_at: Some(rate.updated_at),
+        })
+    }
+}
+
+async fn calculate_snapshot(
+    context: &mut RefreshContext,
     decision_id: &str,
+    legs: &[DecisionDeltaLeg],
 ) -> AppResult<DecisionDeltaSnapshot> {
-    let legs = list_legs(pool, decision_id).await?;
     if legs.len() < 2 {
         return Err(AppError::bad_request("decision is not quantifiable"));
     }
@@ -632,12 +733,11 @@ async fn calculate_snapshot(
         .find(|leg| leg.leg_kind == "baseline")
         .ok_or_else(|| AppError::bad_request("baseline leg is missing"))?;
 
-    let actual_value = leg_current_value(actual, market_data.clone()).await?;
-    let baseline_value = leg_current_value(baseline, market_data.clone()).await?;
+    let actual_value = leg_current_value(actual, context).await?;
+    let baseline_value = leg_current_value(baseline, context).await?;
     let delta_value = actual_value.value - baseline_value.value;
-    let portfolio_summary = portfolio::summary(pool).await?;
-    let portfolio_impact_pct = (portfolio_summary.total_market_value_base > 0.0)
-        .then_some(delta_value / portfolio_summary.total_market_value_base);
+    let portfolio_impact_pct = (context.total_market_value_base > 0.0)
+        .then_some(delta_value / context.total_market_value_base);
     let now = now_iso();
 
     Ok(DecisionDeltaSnapshot {
@@ -677,18 +777,15 @@ struct LegValue {
 
 async fn leg_current_value(
     leg: &DecisionDeltaLeg,
-    market_data: Arc<dyn MarketDataProvider>,
+    context: &mut RefreshContext,
 ) -> AppResult<LegValue> {
     if let Some(symbol) = &leg.symbol {
-        let quote = market_data
-            .quote(symbol)
-            .await
-            .map_err(|error| AppError::internal(error.to_string()))?;
+        let quote = context.quote(symbol).await?;
         let currency = quote
             .currency
             .clone()
             .unwrap_or_else(|| leg.currency.clone());
-        let fx = fx_for_currency(market_data, &currency).await?;
+        let fx = context.exchange_rate(&currency).await?;
         let quantity = leg.quantity.unwrap_or_default();
         return Ok(LegValue {
             value: quantity * quote.price * fx.rate,
@@ -701,7 +798,7 @@ async fn leg_current_value(
         });
     }
 
-    let fx = fx_for_currency(market_data, &leg.currency).await?;
+    let fx = context.exchange_rate(&leg.currency).await?;
     Ok(LegValue {
         value: leg.notional.unwrap_or_default() * fx.rate,
         price: None,
@@ -717,28 +814,6 @@ struct FxValue {
     rate: f64,
     source: Option<String>,
     updated_at: Option<String>,
-}
-
-async fn fx_for_currency(
-    market_data: Arc<dyn MarketDataProvider>,
-    currency: &str,
-) -> AppResult<FxValue> {
-    if currency.eq_ignore_ascii_case(BASE_CURRENCY) {
-        return Ok(FxValue {
-            rate: 1.0,
-            source: Some("identity".to_string()),
-            updated_at: Some(now_iso()),
-        });
-    }
-    let rate = market_data
-        .exchange_rate(currency, BASE_CURRENCY)
-        .await
-        .map_err(|error| AppError::internal(error.to_string()))?;
-    Ok(FxValue {
-        rate: rate.rate,
-        source: Some(rate.source),
-        updated_at: Some(rate.updated_at),
-    })
 }
 
 async fn insert_snapshot(pool: &SqlitePool, snapshot: &DecisionDeltaSnapshot) -> AppResult<()> {
@@ -803,9 +878,48 @@ async fn list_legs(pool: &SqlitePool, decision_id: &str) -> AppResult<Vec<Decisi
     rows.into_iter().map(leg_from_row).collect()
 }
 
+async fn list_legs_for_decisions(
+    pool: &SqlitePool,
+    decision_ids: &[String],
+) -> AppResult<HashMap<String, Vec<DecisionDeltaLeg>>> {
+    if decision_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut query = QueryBuilder::<Sqlite>::new(
+        r#"
+        SELECT id, decision_id, leg_kind, baseline_type, symbol, quantity,
+               notional, price, currency, created_at, updated_at
+        FROM decision_delta_legs
+        WHERE decision_id IN (
+        "#,
+    );
+    let mut separated = query.separated(", ");
+    for decision_id in decision_ids {
+        separated.push_bind(decision_id);
+    }
+    separated.push_unseparated(
+        r#")
+        ORDER BY decision_id, CASE leg_kind WHEN 'actual' THEN 0 ELSE 1 END
+        "#,
+    );
+
+    let rows = query.build().fetch_all(pool).await?;
+    let mut by_decision: HashMap<String, Vec<DecisionDeltaLeg>> = HashMap::new();
+    for row in rows {
+        let leg = leg_from_row(row)?;
+        by_decision
+            .entry(leg.decision_id.clone())
+            .or_default()
+            .push(leg);
+    }
+    Ok(by_decision)
+}
+
 async fn list_snapshots(
     pool: &SqlitePool,
     decision_id: &str,
+    limit: usize,
 ) -> AppResult<Vec<DecisionDeltaSnapshot>> {
     let rows = sqlx::query(
         r#"
@@ -815,9 +929,11 @@ async fn list_snapshots(
         FROM decision_delta_snapshots
         WHERE decision_id = ?
         ORDER BY created_at DESC, id DESC
+        LIMIT ?
         "#,
     )
     .bind(decision_id)
+    .bind(limit as i64)
     .fetch_all(pool)
     .await?;
 
@@ -828,7 +944,22 @@ async fn latest_snapshot(
     pool: &SqlitePool,
     decision_id: &str,
 ) -> AppResult<Option<DecisionDeltaSnapshot>> {
-    Ok(list_snapshots(pool, decision_id).await?.into_iter().next())
+    let row = sqlx::query(
+        r#"
+        SELECT id, decision_id, as_of_date, actual_value, baseline_value, delta_value,
+               delta_pct, portfolio_impact_pct, price_used, price_source, price_updated_at,
+               fx_rate_used, fx_source, fx_updated_at, price_stale, fx_stale, created_at
+        FROM decision_delta_snapshots
+        WHERE decision_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(decision_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(snapshot_from_row).transpose()
 }
 
 async fn list_quantifiable_decision_ids(pool: &SqlitePool) -> AppResult<Vec<String>> {
@@ -848,20 +979,60 @@ async fn list_quantifiable_decision_ids(pool: &SqlitePool) -> AppResult<Vec<Stri
 }
 
 async fn timeline_items(pool: &SqlitePool) -> AppResult<Vec<DecisionDeltaTimelineItem>> {
-    let decisions = decision::list(pool).await?;
-    let mut items = Vec::with_capacity(decisions.len());
-    for decision in decisions {
-        let legs = list_legs(pool, &decision.id).await?;
-        let latest_snapshot = latest_snapshot(pool, &decision.id).await?;
-        let reviewed = get_review_optional(pool, &decision.id).await?.is_some();
-        items.push(DecisionDeltaTimelineItem {
-            decision,
-            quantifiable: legs.len() >= 2,
-            reviewed,
-            latest_snapshot,
-        });
-    }
-    Ok(items)
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            d.id, d.memo_id, d.symbol, d.action, d.rationale, d.confidence,
+            d.expected_outcome, d.review_date, d.created_at,
+            COALESCE(leg_counts.leg_count, 0) AS leg_count,
+            reviews.decision_id IS NOT NULL AS reviewed,
+            snapshots.id AS snapshot_id,
+            snapshots.decision_id AS snapshot_decision_id,
+            snapshots.as_of_date AS snapshot_as_of_date,
+            snapshots.actual_value AS snapshot_actual_value,
+            snapshots.baseline_value AS snapshot_baseline_value,
+            snapshots.delta_value AS snapshot_delta_value,
+            snapshots.delta_pct AS snapshot_delta_pct,
+            snapshots.portfolio_impact_pct AS snapshot_portfolio_impact_pct,
+            snapshots.price_used AS snapshot_price_used,
+            snapshots.price_source AS snapshot_price_source,
+            snapshots.price_updated_at AS snapshot_price_updated_at,
+            snapshots.fx_rate_used AS snapshot_fx_rate_used,
+            snapshots.fx_source AS snapshot_fx_source,
+            snapshots.fx_updated_at AS snapshot_fx_updated_at,
+            snapshots.price_stale AS snapshot_price_stale,
+            snapshots.fx_stale AS snapshot_fx_stale,
+            snapshots.created_at AS snapshot_created_at
+        FROM decisions d
+        LEFT JOIN (
+            SELECT decision_id, COUNT(*) AS leg_count
+            FROM decision_delta_legs
+            GROUP BY decision_id
+        ) leg_counts ON leg_counts.decision_id = d.id
+        LEFT JOIN decision_delta_reviews reviews ON reviews.decision_id = d.id
+        LEFT JOIN decision_delta_snapshots snapshots ON snapshots.id = (
+            SELECT latest.id
+            FROM decision_delta_snapshots latest
+            WHERE latest.decision_id = d.id
+            ORDER BY latest.created_at DESC, latest.id DESC
+            LIMIT 1
+        )
+        ORDER BY d.created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(DecisionDeltaTimelineItem {
+                decision: decision_from_timeline_row(&row)?,
+                quantifiable: row.try_get::<i64, _>("leg_count")? >= 2,
+                reviewed: row.try_get::<bool, _>("reviewed")?,
+                latest_snapshot: snapshot_from_timeline_row(&row)?,
+            })
+        })
+        .collect()
 }
 
 fn apply_filters(items: &mut Vec<DecisionDeltaTimelineItem>, query: &DecisionDeltaTimelineQuery) {
@@ -978,6 +1149,56 @@ fn leg_from_row(row: sqlx::sqlite::SqliteRow) -> AppResult<DecisionDeltaLeg> {
     })
 }
 
+fn decision_from_timeline_row(row: &sqlx::sqlite::SqliteRow) -> AppResult<Decision> {
+    Ok(Decision {
+        id: row.try_get("id")?,
+        memo_id: row.try_get("memo_id")?,
+        symbol: row.try_get("symbol")?,
+        action: row.try_get("action")?,
+        rationale: row.try_get("rationale")?,
+        confidence: row.try_get("confidence")?,
+        expected_outcome: row.try_get("expected_outcome")?,
+        review_date: row.try_get("review_date")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn snapshot_from_timeline_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> AppResult<Option<DecisionDeltaSnapshot>> {
+    let Some(id) = row.try_get::<Option<String>, _>("snapshot_id")? else {
+        return Ok(None);
+    };
+
+    Ok(Some(DecisionDeltaSnapshot {
+        id,
+        decision_id: required_alias(row, "snapshot_decision_id")?,
+        as_of_date: required_alias(row, "snapshot_as_of_date")?,
+        actual_value: required_alias(row, "snapshot_actual_value")?,
+        baseline_value: required_alias(row, "snapshot_baseline_value")?,
+        delta_value: required_alias(row, "snapshot_delta_value")?,
+        delta_pct: row.try_get("snapshot_delta_pct")?,
+        portfolio_impact_pct: row.try_get("snapshot_portfolio_impact_pct")?,
+        price_used: row.try_get("snapshot_price_used")?,
+        price_source: row.try_get("snapshot_price_source")?,
+        price_updated_at: row.try_get("snapshot_price_updated_at")?,
+        fx_rate_used: row.try_get("snapshot_fx_rate_used")?,
+        fx_source: row.try_get("snapshot_fx_source")?,
+        fx_updated_at: row.try_get("snapshot_fx_updated_at")?,
+        price_stale: required_alias::<i64>(row, "snapshot_price_stale")? != 0,
+        fx_stale: required_alias::<i64>(row, "snapshot_fx_stale")? != 0,
+        created_at: required_alias(row, "snapshot_created_at")?,
+    }))
+}
+
+fn required_alias<T>(row: &sqlx::sqlite::SqliteRow, name: &str) -> AppResult<T>
+where
+    for<'a> T: sqlx::Decode<'a, Sqlite> + sqlx::Type<Sqlite>,
+{
+    row.try_get::<Option<T>, _>(name)?
+        .ok_or_else(|| AppError::internal(format!("{name} is missing")))
+}
+
 fn snapshot_from_row(row: sqlx::sqlite::SqliteRow) -> AppResult<DecisionDeltaSnapshot> {
     Ok(DecisionDeltaSnapshot {
         id: row.try_get("id")?,
@@ -1080,6 +1301,13 @@ fn parse_bool(value: Option<&str>) -> Option<bool> {
         "false" | "0" | "no" => Some(false),
         _ => None,
     }
+}
+
+fn snapshot_limit(value: Option<usize>) -> usize {
+    value
+        .filter(|limit| *limit > 0)
+        .unwrap_or(DEFAULT_SNAPSHOT_LIMIT)
+        .min(MAX_SNAPSHOT_LIMIT)
 }
 
 fn round_money(value: f64) -> f64 {

@@ -5,6 +5,7 @@ import {
   formatDecisionDeltaMoney,
   formatDecisionDeltaPercent,
   singleForkLegs,
+  snapshotHistoryLimitLabel,
   summarizeVisibleDecisionDeltas
 } from "../src/pages/decisionDeltaRules.ts";
 import type {
@@ -57,6 +58,10 @@ test("action comparison keeps each decision to a single actual versus baseline f
 
   assert.equal(legs.actual?.symbol, "AAPL");
   assert.equal(legs.baseline?.baseline_type, "cash");
+});
+
+test("snapshot history label communicates the visible history limit", () => {
+  assert.equal(snapshotHistoryLimitLabel(90), "Latest 90 snapshots");
 });
 
 function item(

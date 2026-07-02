@@ -207,6 +207,7 @@ market data provider 会刷新股票报价和 FX。Alpha Vantage provider 使用
 - `GET /api/decision-deltas/timeline`
 - `GET /api/decision-deltas/timeline?symbol=AAPL&delta=positive&sort=absolute_delta`
 - `GET /api/decision-deltas/{decision_id}`
+- `GET /api/decision-deltas/{decision_id}?snapshot_limit=30`
 - `POST /api/decision-deltas/refresh`
 - `PATCH /api/decision-deltas/{decision_id}/review`
 - `POST /api/decision-deltas/{decision_id}/adopt`
@@ -220,6 +221,8 @@ market data provider 会刷新股票报价和 FX。Alpha Vantage provider 使用
 ```
 
 时间线返回当前筛选范围内每条决策的最新 snapshot 和汇总。汇总口径是 `sum_of_decision_deltas`，即最新 `actual_value - baseline_value` 之和，不代表完整 portfolio NAV 反事实。
+
+Decision detail 默认返回最近 90 条 snapshots。可用 `snapshot_limit` 调整返回数量；最大值为 365，非法值回退默认值。`latest_snapshot` 始终单独返回最新一条。
 
 保存复盘：
 

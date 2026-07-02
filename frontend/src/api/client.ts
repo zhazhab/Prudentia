@@ -95,8 +95,12 @@ export const api = {
   decision: (id: string) => request<Decision>(`/api/decisions/${id}`),
   decisionDeltaTimeline: (params: DecisionDeltaTimelineFilters = {}) =>
     request<DecisionDeltaTimeline>(`/api/decision-deltas/timeline${queryString({ ...params })}`),
-  decisionDeltaDetail: (id: string) =>
-    request<DecisionDeltaDetail>(`/api/decision-deltas/${id}`),
+  decisionDeltaDetail: (id: string, snapshotLimit?: number) =>
+    request<DecisionDeltaDetail>(
+      `/api/decision-deltas/${id}${queryString({
+        snapshot_limit: snapshotLimit == null ? undefined : String(snapshotLimit)
+      })}`
+    ),
   refreshDecisionDeltas: (decisionIds?: string[]) =>
     request<RefreshDecisionDeltasResult>("/api/decision-deltas/refresh", {
       method: "POST",

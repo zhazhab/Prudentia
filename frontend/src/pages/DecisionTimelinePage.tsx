@@ -21,6 +21,8 @@ import {
   summarizeVisibleDecisionDeltas
 } from "./decisionDeltaRules";
 
+const snapshotHistoryLimit = 90;
+
 const emptyReviewForm = {
   notes: "",
   thesis_evidence: "",
@@ -36,6 +38,7 @@ export function DecisionTimelinePage() {
   const { languageTag, t } = useI18n();
   const queryClient = useQueryClient();
   const [filters, setFilters] = useState<DecisionDeltaTimelineFilters>({ sort: "date" });
+  const [symbolInput, setSymbolInput] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reviewForm, setReviewForm] = useState<ReviewForm>(emptyReviewForm);
   const [selectedPrinciples, setSelectedPrinciples] = useState<string[]>([]);
@@ -51,9 +54,20 @@ export function DecisionTimelinePage() {
 
   const detail = useQuery({
     queryKey: ["decision-delta-detail", selectedId],
-    queryFn: () => api.decisionDeltaDetail(selectedId ?? ""),
+    queryFn: () => api.decisionDeltaDetail(selectedId ?? "", snapshotHistoryLimit),
     enabled: Boolean(selectedId)
   });
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setFilters((current) => ({
+        ...current,
+        symbol: symbolInput.trim() ? symbolInput.trim().toUpperCase() : undefined
+      }));
+    }, 250);
+
+    return () => window.clearTimeout(timeout);
+  }, [symbolInput]);
 
   useEffect(() => {
     if (!items.length) {
@@ -220,8 +234,8 @@ export function DecisionTimelinePage() {
         <label>
           <span>{t("decisionDelta.symbol")}</span>
           <input
-            value={filters.symbol ?? ""}
-            onChange={(event) => updateFilter("symbol", event.target.value.toUpperCase())}
+            value={symbolInput}
+            onChange={(event) => setSymbolInput(event.target.value.toUpperCase())}
             placeholder={t("decisionDelta.allSymbols")}
           />
         </label>
@@ -310,6 +324,7 @@ export function DecisionTimelinePage() {
               setSelectedChecklist={setSelectedChecklist}
               onSubmitReview={submitReview}
               onAdopt={() => adoptCandidates.mutate()}
+              snapshotHistoryLimit={snapshotHistoryLimit}
               savePending={saveReview.isPending}
               adoptPending={adoptCandidates.isPending}
               t={t}
@@ -377,6 +392,7 @@ function DecisionDeltaDetailView({
   setSelectedChecklist,
   onSubmitReview,
   onAdopt,
+  snapshotHistoryLimit,
   savePending,
   adoptPending,
   t
@@ -391,6 +407,7 @@ function DecisionDeltaDetailView({
   setSelectedChecklist: (values: string[]) => void;
   onSubmitReview: (event: FormEvent) => void;
   onAdopt: () => void;
+  snapshotHistoryLimit: number;
   savePending: boolean;
   adoptPending: boolean;
   t: (key: TranslationKey, values?: Record<string, string | number>) => string;
@@ -457,7 +474,11 @@ function DecisionDeltaDetailView({
 
       <section className="decision-delta-history">
         <div className="panel-head">
-          <h3>{t("decisionDelta.snapshotHistory")}</h3>
+          <h3>
+            {t("decisionDelta.snapshotHistoryLimited", {
+              count: snapshotHistoryLimit
+            })}
+          </h3>
         </div>
         <div className="data-table-wrap">
           <table>

@@ -184,6 +184,23 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_delta_legs_decision_kind ON decision_delta_legs(decision_id, leg_kind);",
+    )
+    .await?;
+
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decision_delta_snapshots_latest ON decision_delta_snapshots(decision_id, created_at DESC, id DESC);",
+    )
+    .await?;
+
+    pool.execute("CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON decisions(symbol);")
+        .await?;
+    pool.execute("CREATE INDEX IF NOT EXISTS idx_decisions_action ON decisions(action);")
+        .await?;
+    pool.execute("CREATE INDEX IF NOT EXISTS idx_decisions_created_at ON decisions(created_at);")
+        .await?;
+
+    pool.execute(
         r#"
         CREATE TABLE IF NOT EXISTS research_records (
             id TEXT PRIMARY KEY,
