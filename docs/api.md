@@ -173,17 +173,73 @@ market data provider 会刷新股票报价和 FX。Alpha Vantage provider 使用
 
 ## Decisions
 
+- `GET /api/decisions/`
 - `POST /api/decisions/`
+- `GET /api/decisions/{id}`
 
 ```json
 {
   "memo_id": "optional-memo-id",
   "symbol": "AAPL",
-  "action": "watch",
-  "rationale": "Waiting for a better risk/reward entry.",
+  "action": "buy",
+  "rationale": "Services mix is improving.",
   "confidence": 0.65,
   "expected_outcome": "Track margin and services mix.",
-  "review_date": "2026-09-30"
+  "review_date": "2026-09-30",
+  "decision_date": "2026-07-03",
+  "quantity": 10,
+  "notional": 1000,
+  "price": 100,
+  "currency": "CNY",
+  "baseline_type": "cash",
+  "hypothetical_notional": null
+}
+```
+
+`quantity` / `notional` / `price` / `currency` / `baseline_type` / `hypothetical_notional` 是可选量化字段。提供后，后端会为支持的动作生成 decision delta legs：
+
+- `buy` / `add`：actual 为实际持仓，baseline 默认为现金。
+- `sell` / `trim`：actual 为现金，baseline 默认为继续持有。
+- `watch` / `skip`：只有提供 `hypothetical_notional` 时才量化；actual 为保留现金，baseline 默认为假设买入。
+
+## Decision Deltas
+
+- `GET /api/decision-deltas/timeline`
+- `GET /api/decision-deltas/timeline?symbol=AAPL&delta=positive&sort=absolute_delta`
+- `GET /api/decision-deltas/{decision_id}`
+- `POST /api/decision-deltas/refresh`
+- `PATCH /api/decision-deltas/{decision_id}/review`
+- `POST /api/decision-deltas/{decision_id}/adopt`
+
+刷新指定决策，或省略 `decision_ids` 刷新全部可量化决策：
+
+```json
+{
+  "decision_ids": ["decision-id"]
+}
+```
+
+时间线返回当前筛选范围内每条决策的最新 snapshot 和汇总。汇总口径是 `sum_of_decision_deltas`，即最新 `actual_value - baseline_value` 之和，不代表完整 portfolio NAV 反事实。
+
+保存复盘：
+
+```json
+{
+  "notes": "Good process, not just good outcome.",
+  "thesis_evidence": ["Services margin expanded."],
+  "disconfirming_evidence": ["Hardware cycle softened."],
+  "lessons": ["Size slowly when baseline is cash."],
+  "candidate_principles": ["Measure decision deltas before celebrating."],
+  "candidate_checklist_items": ["What is the no-action baseline?"]
+}
+```
+
+采纳复盘候选项到投资体系：
+
+```json
+{
+  "principles": ["Measure decision deltas before celebrating."],
+  "checklist_items": ["What is the no-action baseline?"]
 }
 ```
 
@@ -191,7 +247,7 @@ market data provider 会刷新股票报价和 FX。Alpha Vantage provider 使用
 
 - `GET /api/profile`
 
-画像由 memos、decisions 和 portfolio 状态计算。v1 有意采用规则驱动。
+画像由 memos、decisions、decision delta reviews 和 portfolio 状态计算。v1 有意采用规则驱动，奖励复盘行为而不是正收益结果。
 
 ## Settings
 

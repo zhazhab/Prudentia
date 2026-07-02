@@ -6,8 +6,8 @@ use sqlx::SqlitePool;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
-    ai::runtime::AiRuntime, decision, investment_system, market_data::MarketDataProvider, memo,
-    portfolio, profile, research, settings, state::AppState,
+    ai::runtime::AiRuntime, decision, decision_delta, investment_system,
+    market_data::MarketDataProvider, memo, portfolio, profile, research, settings, state::AppState,
 };
 
 pub fn build_router(
@@ -27,6 +27,7 @@ pub fn build_router(
         .nest("/api/investment-system", investment_system::routes())
         .nest("/api/portfolio", portfolio::routes())
         .nest("/api/decisions", decision::routes())
+        .nest("/api/decision-deltas", decision_delta::routes())
         .nest("/api/research", research::routes())
         .nest("/api/settings", settings::routes())
         .route("/api/profile", get(profile::get_profile))

@@ -12,6 +12,7 @@ use prudentia_backend::{
     },
     database,
     decision::{self, CreateDecisionRequest},
+    decision_delta::{self, DecisionDeltaReviewRequest, RefreshDecisionDeltasRequest},
     locale::Locale,
     market_data::{
         mock::MockMarketDataProvider, ExchangeRate, MarketDataError, MarketDataProvider,
@@ -110,6 +111,344 @@ async fn failed_price_refresh_marks_stale_and_keeps_value() {
     assert_eq!(result.failed, 2);
     assert_eq!(before.total_market_value, after.total_market_value);
     assert_eq!(after.price_stale_count, 2);
+}
+
+#[tokio::test]
+async fn decisions_can_be_listed_and_loaded() {
+    let pool = test_pool().await;
+    let created = decision::create(
+        &pool,
+        CreateDecisionRequest {
+            memo_id: None,
+            symbol: Some("aapl".to_string()),
+            action: "buy".to_string(),
+            rationale: "Services thesis.".to_string(),
+            confidence: 0.7,
+            expected_outcome: "Margin expansion.".to_string(),
+            review_date: Some("2026-09-30".to_string()),
+            decision_date: None,
+            quantity: None,
+            notional: None,
+            price: None,
+            currency: None,
+            baseline_type: None,
+            hypothetical_notional: None,
+        },
+    )
+    .await
+    .expect("create decision");
+
+    let loaded = decision::get(&pool, &created.id)
+        .await
+        .expect("load decision");
+    assert_eq!(loaded.symbol.as_deref(), Some("AAPL"));
+
+    let decisions = decision::list(&pool).await.expect("list decisions");
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0].id, created.id);
+}
+
+#[tokio::test]
+async fn decision_delta_buy_refresh_compares_asset_against_cash_baseline() {
+    let pool = test_pool().await;
+    let decision = quantified_decision(&pool, "buy", "AAPL", Some(10.0), None, 100.0).await;
+
+    let detail = decision_delta::get_detail(&pool, &decision.id)
+        .await
+        .expect("delta detail");
+    assert_eq!(detail.legs.len(), 2);
+    assert!(detail
+        .legs
+        .iter()
+        .any(|leg| leg.leg_kind == "actual" && leg.symbol.as_deref() == Some("AAPL")));
+    assert!(detail
+        .legs
+        .iter()
+        .any(|leg| leg.leg_kind == "baseline" && leg.baseline_type.as_deref() == Some("cash")));
+
+    let result = decision_delta::refresh(
+        &pool,
+        Arc::new(StaticCnyProvider {
+            price: 120.0,
+            fail: false,
+        }),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![decision.id.clone()]),
+        },
+    )
+    .await
+    .expect("refresh decision deltas");
+
+    assert_eq!(result.refreshed, 1);
+    let detail = decision_delta::get_detail(&pool, &decision.id)
+        .await
+        .expect("delta detail after refresh");
+    let latest = detail.latest_snapshot.expect("latest snapshot");
+    assert_eq!(latest.actual_value, 1200.0);
+    assert_eq!(latest.baseline_value, 1000.0);
+    assert_eq!(latest.delta_value, 200.0);
+    assert_eq!(latest.delta_pct, Some(0.2));
+    assert_eq!(detail.snapshots.len(), 1);
+}
+
+#[tokio::test]
+async fn decision_delta_sell_refresh_compares_cash_against_continued_holding() {
+    let pool = test_pool().await;
+    let decision = quantified_decision(&pool, "sell", "AAPL", Some(10.0), None, 100.0).await;
+
+    decision_delta::refresh(
+        &pool,
+        Arc::new(StaticCnyProvider {
+            price: 120.0,
+            fail: false,
+        }),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![decision.id.clone()]),
+        },
+    )
+    .await
+    .expect("refresh decision deltas");
+
+    let latest = decision_delta::get_detail(&pool, &decision.id)
+        .await
+        .expect("delta detail")
+        .latest_snapshot
+        .expect("latest snapshot");
+    assert_eq!(latest.actual_value, 1000.0);
+    assert_eq!(latest.baseline_value, 1200.0);
+    assert_eq!(latest.delta_value, -200.0);
+}
+
+#[tokio::test]
+async fn decision_delta_non_base_currency_uses_fx() {
+    let pool = test_pool().await;
+    let decision = decision::create(
+        &pool,
+        CreateDecisionRequest {
+            memo_id: None,
+            symbol: Some("AAPL".to_string()),
+            action: "buy".to_string(),
+            rationale: "Buy USD asset and compare against USD cash baseline.".to_string(),
+            confidence: 0.7,
+            expected_outcome: "Track CNY decision delta.".to_string(),
+            review_date: Some("2026-09-30".to_string()),
+            decision_date: Some("2026-01-01".to_string()),
+            quantity: Some(10.0),
+            notional: Some(1000.0),
+            price: Some(100.0),
+            currency: Some("USD".to_string()),
+            baseline_type: None,
+            hypothetical_notional: None,
+        },
+    )
+    .await
+    .expect("create usd decision");
+
+    decision_delta::refresh(
+        &pool,
+        Arc::new(StaticFxQuoteProvider {
+            price: 120.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![decision.id.clone()]),
+        },
+    )
+    .await
+    .expect("refresh decision deltas");
+
+    let latest = decision_delta::get_detail(&pool, &decision.id)
+        .await
+        .expect("delta detail")
+        .latest_snapshot
+        .expect("latest snapshot");
+    assert_eq!(latest.actual_value, 8400.0);
+    assert_eq!(latest.baseline_value, 7000.0);
+    assert_eq!(latest.delta_value, 1400.0);
+    assert_eq!(latest.fx_rate_used, Some(7.0));
+}
+
+#[tokio::test]
+async fn decision_delta_skip_requires_hypothetical_notional_to_quantify() {
+    let pool = test_pool().await;
+    let skipped = quantified_decision(&pool, "skip", "NVDA", None, None, 100.0).await;
+    let detail = decision_delta::get_detail(&pool, &skipped.id)
+        .await
+        .expect("skip detail");
+    assert!(detail.legs.is_empty());
+    assert!(!detail.quantifiable);
+
+    let hypothetical = quantified_decision(&pool, "skip", "NVDA", None, Some(1000.0), 100.0).await;
+    let detail = decision_delta::get_detail(&pool, &hypothetical.id)
+        .await
+        .expect("hypothetical detail");
+    assert!(detail.quantifiable);
+    assert!(detail.legs.iter().any(|leg| leg.leg_kind == "baseline"
+        && leg.baseline_type.as_deref() == Some("hypothetical_buy")));
+}
+
+#[tokio::test]
+async fn decision_delta_timeline_sums_visible_latest_snapshots() {
+    let pool = test_pool().await;
+    let buy = quantified_decision(&pool, "buy", "AAPL", Some(10.0), None, 100.0).await;
+    let sell = quantified_decision(&pool, "sell", "MSFT", Some(10.0), None, 100.0).await;
+
+    decision_delta::refresh(
+        &pool,
+        Arc::new(StaticCnyProvider {
+            price: 120.0,
+            fail: false,
+        }),
+        RefreshDecisionDeltasRequest { decision_ids: None },
+    )
+    .await
+    .expect("refresh all");
+
+    let timeline =
+        decision_delta::timeline(&pool, decision_delta::DecisionDeltaTimelineQuery::default())
+            .await
+            .expect("timeline");
+    assert_eq!(timeline.items.len(), 2);
+    assert_eq!(timeline.summary.label, "sum_of_decision_deltas");
+    assert_eq!(timeline.summary.sum_delta_value, 0.0);
+    assert_eq!(timeline.summary.positive_delta_count, 1);
+    assert_eq!(timeline.summary.negative_delta_count, 1);
+
+    let filtered = decision_delta::timeline(
+        &pool,
+        decision_delta::DecisionDeltaTimelineQuery {
+            symbol: Some("AAPL".to_string()),
+            ..decision_delta::DecisionDeltaTimelineQuery::default()
+        },
+    )
+    .await
+    .expect("filtered timeline");
+    assert_eq!(filtered.items.len(), 1);
+    assert_eq!(filtered.items[0].decision.id, buy.id);
+    assert_ne!(filtered.items[0].decision.id, sell.id);
+    assert_eq!(filtered.summary.sum_delta_value, 200.0);
+}
+
+#[tokio::test]
+async fn decision_delta_snapshots_preserve_history_and_provider_failure_marks_stale() {
+    let pool = test_pool().await;
+    let decision = quantified_decision(&pool, "buy", "AAPL", Some(10.0), None, 100.0).await;
+
+    decision_delta::refresh(
+        &pool,
+        Arc::new(StaticCnyProvider {
+            price: 120.0,
+            fail: false,
+        }),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![decision.id.clone()]),
+        },
+    )
+    .await
+    .expect("first refresh");
+    decision_delta::refresh(
+        &pool,
+        Arc::new(StaticCnyProvider {
+            price: 130.0,
+            fail: false,
+        }),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![decision.id.clone()]),
+        },
+    )
+    .await
+    .expect("second refresh");
+    decision_delta::refresh(
+        &pool,
+        Arc::new(StaticCnyProvider {
+            price: 0.0,
+            fail: true,
+        }),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![decision.id.clone()]),
+        },
+    )
+    .await
+    .expect("failed refresh marks stale");
+
+    let detail = decision_delta::get_detail(&pool, &decision.id)
+        .await
+        .expect("detail");
+    assert_eq!(detail.snapshots.len(), 3);
+    let latest = detail.latest_snapshot.expect("latest");
+    assert!(latest.price_stale);
+    assert_eq!(latest.delta_value, 300.0);
+}
+
+#[tokio::test]
+async fn decision_delta_review_adoption_and_profile_reward_process_not_returns() {
+    let pool = test_pool().await;
+    let decision = quantified_decision(&pool, "buy", "AAPL", Some(10.0), None, 100.0).await;
+    decision_delta::refresh(
+        &pool,
+        Arc::new(StaticCnyProvider {
+            price: 120.0,
+            fail: false,
+        }),
+        RefreshDecisionDeltasRequest {
+            decision_ids: Some(vec![decision.id.clone()]),
+        },
+    )
+    .await
+    .expect("refresh");
+
+    let profile_after_positive_delta = profile::calculate(&pool).await.expect("profile");
+
+    let review = decision_delta::save_review(
+        &pool,
+        &decision.id,
+        DecisionDeltaReviewRequest {
+            notes: "Good process, not just good outcome.".to_string(),
+            thesis_evidence: vec!["Services margin expanded.".to_string()],
+            disconfirming_evidence: vec!["Hardware cycle softened.".to_string()],
+            lessons: vec!["Size slowly when baseline is cash.".to_string()],
+            candidate_principles: vec!["Measure decision deltas before celebrating.".to_string()],
+            candidate_checklist_items: vec!["What is the no-action baseline?".to_string()],
+        },
+    )
+    .await
+    .expect("save review");
+    assert_eq!(review.candidate_principles.len(), 1);
+
+    let system = decision_delta::adopt_candidates(
+        &pool,
+        &decision.id,
+        decision_delta::AdoptDecisionDeltaCandidatesRequest {
+            principles: vec!["Measure decision deltas before celebrating.".to_string()],
+            checklist_items: vec!["What is the no-action baseline?".to_string()],
+        },
+        Locale::En,
+    )
+    .await
+    .expect("adopt candidates");
+    assert!(system
+        .principles
+        .contains(&"Measure decision deltas before celebrating.".to_string()));
+    assert!(system
+        .checklist_items
+        .contains(&"What is the no-action baseline?".to_string()));
+
+    let profile_after_review = profile::calculate(&pool).await.expect("profile");
+    assert!(profile_after_review.xp > profile_after_positive_delta.xp);
+
+    let unknown = decision_delta::adopt_candidates(
+        &pool,
+        &decision.id,
+        decision_delta::AdoptDecisionDeltaCandidatesRequest {
+            principles: vec!["Invented principle".to_string()],
+            checklist_items: Vec::new(),
+        },
+        Locale::En,
+    )
+    .await
+    .expect_err("unknown candidates fail");
+    assert!(format!("{unknown:?}").contains("no selected candidates"));
 }
 
 #[tokio::test]
@@ -465,6 +804,13 @@ async fn profile_accumulates_from_memos_decisions_and_positions() {
             confidence: 0.65,
             expected_outcome: "Track margin and services mix.".to_string(),
             review_date: Some("2026-09-30".to_string()),
+            decision_date: None,
+            quantity: None,
+            notional: None,
+            price: None,
+            currency: None,
+            baseline_type: None,
+            hypothetical_notional: None,
         },
     )
     .await
@@ -1473,6 +1819,116 @@ impl MarketDataProvider for FailingProvider {
         Err(MarketDataError::Provider(format!(
             "{from_currency}/{to_currency} unavailable"
         )))
+    }
+}
+
+async fn quantified_decision(
+    pool: &SqlitePool,
+    action: &str,
+    symbol: &str,
+    quantity: Option<f64>,
+    hypothetical_notional: Option<f64>,
+    price: f64,
+) -> decision::Decision {
+    decision::create(
+        pool,
+        CreateDecisionRequest {
+            memo_id: None,
+            symbol: Some(symbol.to_string()),
+            action: action.to_string(),
+            rationale: format!("{action} {symbol} for delta tracking."),
+            confidence: 0.7,
+            expected_outcome: "Track decision delta.".to_string(),
+            review_date: Some("2026-09-30".to_string()),
+            decision_date: Some("2026-01-01".to_string()),
+            quantity,
+            notional: quantity.map(|value| value * price),
+            price: Some(price),
+            currency: Some("CNY".to_string()),
+            baseline_type: None,
+            hypothetical_notional,
+        },
+    )
+    .await
+    .expect("create quantified decision")
+}
+
+struct StaticCnyProvider {
+    price: f64,
+    fail: bool,
+}
+
+#[async_trait]
+impl MarketDataProvider for StaticCnyProvider {
+    async fn quote(&self, symbol: &str) -> Result<MarketQuote, MarketDataError> {
+        if self.fail {
+            return Err(MarketDataError::Provider(format!("{symbol} unavailable")));
+        }
+
+        Ok(MarketQuote {
+            symbol: symbol.to_uppercase(),
+            price: self.price,
+            currency: Some("CNY".to_string()),
+            volume: None,
+            source: "static-test".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
+    }
+
+    async fn exchange_rate(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        if self.fail && !from_currency.eq_ignore_ascii_case(to_currency) {
+            return Err(MarketDataError::Provider("fx unavailable".to_string()));
+        }
+
+        Ok(ExchangeRate {
+            from_currency: from_currency.to_ascii_uppercase(),
+            to_currency: to_currency.to_ascii_uppercase(),
+            rate: 1.0,
+            source: "static-test".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
+    }
+}
+
+struct StaticFxQuoteProvider {
+    price: f64,
+    currency: &'static str,
+    fx_rate: f64,
+}
+
+#[async_trait]
+impl MarketDataProvider for StaticFxQuoteProvider {
+    async fn quote(&self, symbol: &str) -> Result<MarketQuote, MarketDataError> {
+        Ok(MarketQuote {
+            symbol: symbol.to_uppercase(),
+            price: self.price,
+            currency: Some(self.currency.to_string()),
+            volume: None,
+            source: "static-fx-test".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
+    }
+
+    async fn exchange_rate(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        Ok(ExchangeRate {
+            from_currency: from_currency.to_ascii_uppercase(),
+            to_currency: to_currency.to_ascii_uppercase(),
+            rate: if from_currency.eq_ignore_ascii_case(to_currency) {
+                1.0
+            } else {
+                self.fx_rate
+            },
+            source: "static-fx-test".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
+        })
     }
 }
 

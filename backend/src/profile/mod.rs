@@ -57,12 +57,15 @@ pub async fn calculate_with_locale(
         "SELECT COUNT(*) AS count FROM decisions WHERE review_date IS NOT NULL AND length(review_date) > 0",
     )
     .await?;
+    let decision_delta_review_count =
+        count(pool, "SELECT COUNT(*) AS count FROM decision_delta_reviews").await?;
     let positions = portfolio::list_positions(pool).await?;
 
     let xp = (memo_count * 25)
         + (memo_with_risk_count * 20)
         + (decision_count * 35)
         + (reviewed_decision_count * 25)
+        + (decision_delta_review_count * 30)
         + ((positions.len() as u32) * 8);
     let level = (xp / 100) + 1;
     let next_level_xp = level * 100;
@@ -88,11 +91,15 @@ pub async fn calculate_with_locale(
         },
         ProfileAttribute {
             name: text(locale, "Decision Discipline", "决策纪律"),
-            score: bounded_score(decision_count * 10 + reviewed_decision_count * 15),
+            score: bounded_score(
+                decision_count * 10
+                    + reviewed_decision_count * 15
+                    + decision_delta_review_count * 20,
+            ),
             description: text(
                 locale,
-                "Records decisions with rationale, confidence, and review dates.",
-                "记录决策理由、信心程度和复盘日期。",
+                "Records decisions, review dates, and decision-delta lessons.",
+                "记录决策、复盘日期和决策差异经验。",
             ),
         },
         ProfileAttribute {
@@ -147,6 +154,16 @@ pub async fn calculate_with_locale(
             ),
         });
     }
+    if decision_delta_review_count > 0 {
+        badges.push(Badge {
+            name: text(locale, "Decision Delta Reviewer", "决策差异复盘者"),
+            description: text(
+                locale,
+                "Reviewed a decision delta and captured process lessons.",
+                "复盘了一次决策差异，并沉淀过程经验。",
+            ),
+        });
+    }
 
     let mut bias_signals = Vec::new();
     if decision_count > 0 && reviewed_decision_count == 0 {
@@ -175,10 +192,14 @@ pub async fn calculate_with_locale(
     if locale.is_zh() {
         rule_events.push(format!("已记录 {memo_count} 份备忘录"));
         rule_events.push(format!("已记录 {decision_count} 次决策"));
+        rule_events.push(format!("已复盘 {decision_delta_review_count} 次决策差异"));
         rule_events.push(format!("已跟踪 {} 个持仓", positions.len()));
     } else {
         rule_events.push(format!("{memo_count} memos logged"));
         rule_events.push(format!("{decision_count} decisions recorded"));
+        rule_events.push(format!(
+            "{decision_delta_review_count} decision deltas reviewed"
+        ));
         rule_events.push(format!("{} positions tracked", positions.len()));
     }
 

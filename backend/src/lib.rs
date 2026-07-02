@@ -2,6 +2,7 @@ pub mod ai;
 pub mod config;
 pub mod database;
 pub mod decision;
+pub mod decision_delta;
 pub mod error;
 pub mod investment_system;
 pub mod locale;

@@ -34,6 +34,143 @@ export interface InvestmentSystemRefinement extends InvestmentSystem {
   summary: string;
 }
 
+export interface Decision {
+  id: string;
+  memo_id?: string | null;
+  symbol?: string | null;
+  action: string;
+  rationale: string;
+  confidence: number;
+  expected_outcome: string;
+  review_date?: string | null;
+  created_at: string;
+}
+
+export interface CreateDecisionRequest {
+  memo_id?: string | null;
+  symbol?: string | null;
+  action: string;
+  rationale: string;
+  confidence: number;
+  expected_outcome: string;
+  review_date?: string | null;
+  decision_date?: string | null;
+  quantity?: number | null;
+  notional?: number | null;
+  price?: number | null;
+  currency?: string | null;
+  baseline_type?: string | null;
+  hypothetical_notional?: number | null;
+}
+
+export interface DecisionDeltaLeg {
+  id: string;
+  decision_id: string;
+  leg_kind: string;
+  baseline_type?: string | null;
+  symbol?: string | null;
+  quantity?: number | null;
+  notional?: number | null;
+  price?: number | null;
+  currency: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DecisionDeltaSnapshot {
+  id: string;
+  decision_id: string;
+  as_of_date: string;
+  actual_value: number;
+  baseline_value: number;
+  delta_value: number;
+  delta_pct?: number | null;
+  portfolio_impact_pct?: number | null;
+  price_used?: number | null;
+  price_source?: string | null;
+  price_updated_at?: string | null;
+  fx_rate_used?: number | null;
+  fx_source?: string | null;
+  fx_updated_at?: string | null;
+  price_stale: boolean;
+  fx_stale: boolean;
+  created_at: string;
+}
+
+export interface DecisionDeltaReview {
+  decision_id: string;
+  notes: string;
+  thesis_evidence: string[];
+  disconfirming_evidence: string[];
+  lessons: string[];
+  candidate_principles: string[];
+  candidate_checklist_items: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DecisionDeltaDetail {
+  decision: Decision;
+  legs: DecisionDeltaLeg[];
+  quantifiable: boolean;
+  latest_snapshot?: DecisionDeltaSnapshot | null;
+  snapshots: DecisionDeltaSnapshot[];
+  review?: DecisionDeltaReview | null;
+}
+
+export interface DecisionDeltaTimelineSummary {
+  label: string;
+  visible_decisions_count: number;
+  quantifiable_decisions_count: number;
+  positive_delta_count: number;
+  negative_delta_count: number;
+  sum_delta_value: number;
+  sum_portfolio_impact_pct?: number | null;
+  last_refreshed_at?: string | null;
+}
+
+export interface DecisionDeltaTimelineItem {
+  decision: Decision;
+  quantifiable: boolean;
+  reviewed: boolean;
+  latest_snapshot?: DecisionDeltaSnapshot | null;
+}
+
+export interface DecisionDeltaTimeline {
+  summary: DecisionDeltaTimelineSummary;
+  items: DecisionDeltaTimelineItem[];
+}
+
+export interface DecisionDeltaTimelineFilters {
+  symbol?: string;
+  action?: string;
+  year?: string;
+  delta?: string;
+  stale?: string;
+  reviewed?: string;
+  sort?: string;
+}
+
+export interface RefreshDecisionDeltasResult {
+  refreshed: number;
+  failed: number;
+  failures: string[];
+}
+
+export interface DecisionDeltaReviewRequest {
+  notes: string;
+  thesis_evidence: string[];
+  disconfirming_evidence: string[];
+  lessons: string[];
+  candidate_principles: string[];
+  candidate_checklist_items: string[];
+}
+
+export interface AdoptDecisionDeltaCandidatesRequest {
+  principles: string[];
+  checklist_items: string[];
+}
+
 export type ResearchRecordKind = "distillation" | "stock_snapshot" | "portfolio_review";
 
 export interface ResearchRecord {

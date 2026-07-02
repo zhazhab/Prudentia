@@ -121,6 +121,70 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     pool.execute(
         r#"
+        CREATE TABLE IF NOT EXISTS decision_delta_legs (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            leg_kind TEXT NOT NULL,
+            baseline_type TEXT,
+            symbol TEXT,
+            quantity REAL,
+            notional REAL,
+            price REAL,
+            currency TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(decision_id) REFERENCES decisions(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS decision_delta_snapshots (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            actual_value REAL NOT NULL,
+            baseline_value REAL NOT NULL,
+            delta_value REAL NOT NULL,
+            delta_pct REAL,
+            portfolio_impact_pct REAL,
+            price_used REAL,
+            price_source TEXT,
+            price_updated_at TEXT,
+            fx_rate_used REAL,
+            fx_source TEXT,
+            fx_updated_at TEXT,
+            price_stale INTEGER NOT NULL,
+            fx_stale INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(decision_id) REFERENCES decisions(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS decision_delta_reviews (
+            decision_id TEXT PRIMARY KEY,
+            notes TEXT NOT NULL,
+            thesis_evidence_json TEXT NOT NULL,
+            disconfirming_evidence_json TEXT NOT NULL,
+            lessons_json TEXT NOT NULL,
+            candidate_principles_json TEXT NOT NULL,
+            candidate_checklist_items_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(decision_id) REFERENCES decisions(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
         CREATE TABLE IF NOT EXISTS research_records (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
