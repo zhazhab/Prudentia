@@ -110,7 +110,33 @@ export interface PortfolioSummary {
   price_stale_count: number;
   top_positions: WeightSlice[];
   sectors: WeightSlice[];
+  market_groups: MarketValueGroup[];
+  base_currency: string;
+  total_market_value_base: number;
+  total_cost_base: number;
+  total_unrealized_pnl_base: number;
+  fx_rates: PortfolioFxRate[];
+  fx_stale_count: number;
   updated_at: string;
+}
+
+export interface MarketValueGroup {
+  market: string;
+  currency: string;
+  market_value: number;
+  cost: number;
+  unrealized_pnl: number;
+  market_value_base: number;
+  weight: number;
+}
+
+export interface PortfolioFxRate {
+  from_currency: string;
+  to_currency: string;
+  rate: number;
+  source: string;
+  updated_at: string;
+  stale: boolean;
 }
 
 export interface PortfolioImportMapping {
@@ -131,6 +157,45 @@ export interface PortfolioImportPreview {
   sample_rows: Record<string, string>[];
   suggested_mapping: PortfolioImportMapping;
   validation_errors: string[];
+  draft_rows: PortfolioDraftRow[];
+}
+
+export interface PortfolioDraftRow {
+  symbol: string;
+  name: string;
+  quantity: string;
+  average_cost: string;
+  currency: string;
+  account?: string | null;
+  market: string;
+  sector?: string | null;
+  imported_market_value?: string | null;
+  notes?: string | null;
+  confidence: "high" | "medium" | "low" | "unknown" | string;
+  warnings: string[];
+  errors: string[];
+}
+
+export interface PortfolioImageDraftRow {
+  symbol: string;
+  name: string;
+  quantity: string;
+  average_cost: string;
+  currency: string;
+  account?: string | null;
+  market?: string | null;
+  sector?: string | null;
+  imported_market_value?: string | null;
+  notes?: string | null;
+  confidence: "high" | "medium" | "low" | "unknown" | string;
+  warnings: string[];
+}
+
+export interface PortfolioImageImportPreview {
+  draft_rows: PortfolioDraftRow[];
+  rows: PortfolioImageDraftRow[];
+  warnings: string[];
+  source: string;
 }
 
 export interface PortfolioImportResult {
@@ -144,6 +209,35 @@ export interface PriceRefreshResult {
   failed: number;
   failures: string[];
   positions: PortfolioPosition[];
+}
+
+export interface PortfolioDraftPreview {
+  draft_rows: PortfolioDraftRow[];
+  warnings: string[];
+  source: string;
+}
+
+export interface PortfolioImportDraftRequest {
+  file_name: string;
+  content: string;
+  content_encoding?: "base64";
+  mapping: PortfolioImportMapping;
+}
+
+export interface PortfolioDraftCommitRequest {
+  rows: PortfolioDraftRow[];
+}
+
+export interface UpdatePortfolioPosition {
+  name?: string;
+  quantity?: number;
+  average_cost?: number;
+  currency?: string;
+  account?: string | null;
+  market?: string;
+  sector?: string | null;
+  imported_market_value?: number;
+  notes?: string | null;
 }
 
 export interface InvestorProfile {

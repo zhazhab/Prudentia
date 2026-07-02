@@ -7,6 +7,9 @@ import type {
   DistillResearchRequest,
   Memo,
   MemoExtraction,
+  PortfolioDraftCommitRequest,
+  PortfolioDraftPreview,
+  PortfolioImageImportPreview,
   PortfolioImportMapping,
   PortfolioImportPreview,
   PortfolioImportResult,
@@ -15,7 +18,8 @@ import type {
   PriceRefreshResult,
   ResearchRecord,
   StockSnapshotRequest,
-  UpdateAiSettings
+  UpdateAiSettings,
+  UpdatePortfolioPosition
 } from "../types/domain";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -50,6 +54,13 @@ export interface FilePayload {
   file_name: string;
   content: string;
   content_encoding?: "base64";
+}
+
+export interface ImagePayload {
+  file_name: string;
+  content: string;
+  content_encoding: "base64";
+  mime_type: string;
 }
 
 function queryString(params: Record<string, string | undefined>) {
@@ -118,10 +129,34 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  draftPortfolioImport: (payload: FilePayload & { mapping: PortfolioImportMapping }) =>
+    request<PortfolioDraftPreview>("/api/portfolio/import/draft", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  previewPortfolioImageImport: (payload: ImagePayload) =>
+    request<PortfolioImageImportPreview>("/api/portfolio/import/image/preview", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  commitPortfolioDraft: (payload: PortfolioDraftCommitRequest) =>
+    request<PortfolioImportResult>("/api/portfolio/import/draft/commit", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   commitPortfolioImport: (payload: FilePayload & { mapping: PortfolioImportMapping }) =>
     request<PortfolioImportResult>("/api/portfolio/import/commit", {
       method: "POST",
       body: JSON.stringify(payload)
+    }),
+  updatePosition: (symbol: string, payload: UpdatePortfolioPosition) =>
+    request<PortfolioPosition>(`/api/portfolio/positions/${encodeURIComponent(symbol)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deletePosition: (symbol: string) =>
+    request<PortfolioPosition[]>(`/api/portfolio/positions/${encodeURIComponent(symbol)}`, {
+      method: "DELETE"
     }),
   refreshPrices: () =>
     request<PriceRefreshResult>("/api/portfolio/prices/refresh", { method: "POST" }),

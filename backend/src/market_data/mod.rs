@@ -12,6 +12,11 @@ pub mod mock;
 #[async_trait]
 pub trait MarketDataProvider: Send + Sync {
     async fn quote(&self, symbol: &str) -> Result<MarketQuote, MarketDataError>;
+    async fn exchange_rate(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+    ) -> Result<ExchangeRate, MarketDataError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +25,15 @@ pub struct MarketQuote {
     pub price: f64,
     pub currency: Option<String>,
     pub volume: Option<f64>,
+    pub source: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExchangeRate {
+    pub from_currency: String,
+    pub to_currency: String,
+    pub rate: f64,
     pub source: String,
     pub updated_at: String,
 }

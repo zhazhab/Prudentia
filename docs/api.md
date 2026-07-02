@@ -86,12 +86,17 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 ## Portfolio
 
 - `POST /api/portfolio/import/preview`
+- `POST /api/portfolio/import/draft`
+- `POST /api/portfolio/import/image/preview`
+- `POST /api/portfolio/import/draft/commit`
 - `POST /api/portfolio/import/commit`
 - `GET /api/portfolio/positions`
+- `PATCH /api/portfolio/positions/{symbol}`
+- `DELETE /api/portfolio/positions/{symbol}`
 - `GET /api/portfolio/summary`
 - `POST /api/portfolio/prices/refresh`
 
-预览请求：
+文件预览请求会返回 headers、sample rows、建议 mapping，以及可编辑 `draft_rows`：
 
 ```json
 {
@@ -100,7 +105,7 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 }
 ```
 
-提交请求：
+用户调整 mapping 后，可以重新生成草稿：
 
 ```json
 {
@@ -117,6 +122,54 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 ```
 
 导入 `.xlsx` 时，`content` 使用 base64，并将 `content_encoding` 设为 `base64`。
+
+截图识别预览请求：
+
+```json
+{
+  "file_name": "positions.png",
+  "content": "base64-image-content",
+  "content_encoding": "base64",
+  "mime_type": "image/png"
+}
+```
+
+截图识别会调用已配置的 Codex CLI provider 识别可见持仓行，并返回同一套 `draft_rows`。文件和截图草稿都需要用户确认后才写入：
+
+```json
+{
+  "rows": [
+    {
+      "symbol": "AAPL",
+      "name": "Apple",
+      "quantity": "2",
+      "average_cost": "100",
+      "currency": "USD",
+      "market": "US",
+      "account": null,
+      "sector": "Technology",
+      "imported_market_value": "250",
+      "notes": null,
+      "confidence": "high",
+      "warnings": [],
+      "errors": []
+    }
+  ]
+}
+```
+
+确认草稿会按 `symbol` 合并更新，不会删除本次草稿中没有出现的旧持仓。任何草稿行存在 `errors` 时都会被拒绝；低置信行只保留 warning，由用户校对后确认。
+
+`PATCH /api/portfolio/positions/{symbol}` 支持更新 `name`、`quantity`、`average_cost`、`currency`、`account`、`market`、`sector`、`imported_market_value` 和 `notes`。`DELETE /api/portfolio/positions/{symbol}` 用于删除清仓或错误持仓。
+
+`GET /api/portfolio/summary` 保留旧的 native 汇总字段，同时返回：
+
+- `base_currency`：固定为 `CNY`。
+- `total_market_value_base` / `total_cost_base` / `total_unrealized_pnl_base`：按 CNY 汇总。
+- `market_groups`：按 market + currency 分组的 native 市值、CNY 市值和权重。
+- `fx_rates` / `fx_stale_count`：用于 CNY 口径的汇率和 stale 状态。
+
+market data provider 会刷新股票报价和 FX。Alpha Vantage provider 使用 `CURRENCY_EXCHANGE_RATE` 获取 FX；刷新失败时会保留最后成功汇率并标记 stale。
 
 ## Decisions
 

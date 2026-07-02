@@ -86,12 +86,17 @@ Distillations, stock snapshots, and portfolio reviews are saved as research reco
 ## Portfolio
 
 - `POST /api/portfolio/import/preview`
+- `POST /api/portfolio/import/draft`
+- `POST /api/portfolio/import/image/preview`
+- `POST /api/portfolio/import/draft/commit`
 - `POST /api/portfolio/import/commit`
 - `GET /api/portfolio/positions`
+- `PATCH /api/portfolio/positions/{symbol}`
+- `DELETE /api/portfolio/positions/{symbol}`
 - `GET /api/portfolio/summary`
 - `POST /api/portfolio/prices/refresh`
 
-Preview request:
+File preview returns headers, sample rows, a suggested mapping, and editable `draft_rows`:
 
 ```json
 {
@@ -100,7 +105,7 @@ Preview request:
 }
 ```
 
-Commit request:
+After adjusting the mapping, regenerate draft rows:
 
 ```json
 {
@@ -117,6 +122,54 @@ Commit request:
 ```
 
 For `.xlsx` imports, send `content` as base64 and set `content_encoding` to `base64`.
+
+Screenshot recognition preview request:
+
+```json
+{
+  "file_name": "positions.png",
+  "content": "base64-image-content",
+  "content_encoding": "base64",
+  "mime_type": "image/png"
+}
+```
+
+Screenshot recognition uses the configured Codex CLI provider to extract visible holding rows and returns the same `draft_rows` shape. File and screenshot drafts are written only after explicit user confirmation:
+
+```json
+{
+  "rows": [
+    {
+      "symbol": "AAPL",
+      "name": "Apple",
+      "quantity": "2",
+      "average_cost": "100",
+      "currency": "USD",
+      "market": "US",
+      "account": null,
+      "sector": "Technology",
+      "imported_market_value": "250",
+      "notes": null,
+      "confidence": "high",
+      "warnings": [],
+      "errors": []
+    }
+  ]
+}
+```
+
+Draft confirmation merge-upserts by `symbol` and does not delete existing holdings that are absent from the current draft. Rows with `errors` are rejected; low-confidence rows keep warnings and can be confirmed after user review.
+
+`PATCH /api/portfolio/positions/{symbol}` supports updating `name`, `quantity`, `average_cost`, `currency`, `account`, `market`, `sector`, `imported_market_value`, and `notes`. `DELETE /api/portfolio/positions/{symbol}` removes closed or incorrect holdings.
+
+`GET /api/portfolio/summary` keeps the legacy native summary fields and also returns:
+
+- `base_currency`: fixed to `CNY`.
+- `total_market_value_base` / `total_cost_base` / `total_unrealized_pnl_base`: CNY totals.
+- `market_groups`: market + currency groups with native value, CNY value, and weight.
+- `fx_rates` / `fx_stale_count`: FX rates and stale state used for the CNY view.
+
+The market data provider refreshes both quotes and FX. The Alpha Vantage provider uses `CURRENCY_EXCHANGE_RATE` for FX; if refresh fails, Prudentia keeps the last successful rate and marks it stale.
 
 ## Decisions
 

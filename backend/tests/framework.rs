@@ -13,9 +13,15 @@ use prudentia_backend::{
     database,
     decision::{self, CreateDecisionRequest},
     locale::Locale,
-    market_data::{MarketDataError, MarketDataProvider, MarketQuote},
+    market_data::{
+        mock::MockMarketDataProvider, ExchangeRate, MarketDataError, MarketDataProvider,
+        MarketQuote,
+    },
     memo::{self, CreateMemoRequest},
-    portfolio::{self, PortfolioImportCommitRequest, PortfolioImportPreviewRequest},
+    portfolio::{
+        self, PortfolioDraftCommitRequest, PortfolioImportCommitRequest,
+        PortfolioImportDraftRequest, PortfolioImportPreviewRequest, UpdatePortfolioPositionRequest,
+    },
     profile, research, startup,
 };
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
@@ -104,6 +110,328 @@ async fn failed_price_refresh_marks_stale_and_keeps_value() {
     assert_eq!(result.failed, 2);
     assert_eq!(before.total_market_value, after.total_market_value);
     assert_eq!(after.price_stale_count, 2);
+}
+
+#[tokio::test]
+async fn portfolio_image_preview_returns_drafts_without_persisting_positions() {
+    let pool = test_pool().await;
+    let app = startup::build_router(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(FailingProvider),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portfolio/import/image/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "file_name":"positions.png",
+                      "content":"aW1hZ2U=",
+                      "content_encoding":"base64",
+                      "mime_type":"image/png"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let preview: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+    assert_eq!(preview["source"], "codex_cli");
+    assert_eq!(preview["rows"][0]["symbol"], "AAPL");
+    assert_eq!(preview["rows"][0]["confidence"], "high");
+
+    let summary = portfolio::summary(&pool).await.expect("summary");
+    assert_eq!(summary.positions_count, 0);
+}
+
+#[tokio::test]
+async fn portfolio_image_preview_rejects_unsupported_image_type() {
+    let pool = test_pool().await;
+    let app = startup::build_router(pool, Arc::new(mock_ai_runtime()), Arc::new(FailingProvider));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portfolio/import/image/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "file_name":"positions.gif",
+                      "content":"aW1hZ2U=",
+                      "content_encoding":"base64",
+                      "mime_type":"image/gif"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn portfolio_image_preview_rejects_non_base64_content() {
+    let pool = test_pool().await;
+    let app = startup::build_router(pool, Arc::new(mock_ai_runtime()), Arc::new(FailingProvider));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/portfolio/import/image/preview")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "file_name":"positions.png",
+                      "content":"not-base64",
+                      "content_encoding":"base64",
+                      "mime_type":"image/png"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn portfolio_file_preview_returns_editable_draft_rows_with_inferred_markets() {
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: [
+            "symbol,name,quantity,average cost,currency,market value",
+            "AAPL,Apple,2,100,,250",
+            "0700.HK,Tencent,100,300,,32000",
+            "600519,Maotai,10,1600,,18000",
+        ]
+        .join("\n"),
+        content_encoding: None,
+    })
+    .expect("preview");
+
+    assert_eq!(preview.draft_rows.len(), 3);
+    assert_eq!(preview.draft_rows[0].market, "US");
+    assert_eq!(preview.draft_rows[0].currency, "USD");
+    assert_eq!(preview.draft_rows[1].market, "HK");
+    assert_eq!(preview.draft_rows[1].currency, "HKD");
+    assert_eq!(preview.draft_rows[2].market, "CN");
+    assert_eq!(preview.draft_rows[2].currency, "CNY");
+    assert!(preview.draft_rows.iter().all(|row| row.errors.is_empty()));
+}
+
+#[tokio::test]
+async fn portfolio_draft_commit_blocks_invalid_rows_but_allows_low_confidence_rows() {
+    let pool = test_pool().await;
+    let preview = portfolio::draft_from_import(PortfolioImportDraftRequest {
+        file_name: "positions.csv".to_string(),
+        content: [
+            "symbol,name,quantity,average cost,currency,market value",
+            "AAPL,Apple,-2,100,USD,250",
+            "MSFT,Microsoft,1,200,USD,220",
+        ]
+        .join("\n"),
+        content_encoding: None,
+        mapping: portfolio::PortfolioImportMapping {
+            symbol: "symbol".to_string(),
+            name: "name".to_string(),
+            quantity: "quantity".to_string(),
+            average_cost: "average cost".to_string(),
+            currency: "currency".to_string(),
+            imported_market_value: Some("market value".to_string()),
+            ..Default::default()
+        },
+    })
+    .expect("draft");
+
+    let error = portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioDraftCommitRequest {
+            rows: preview.draft_rows.clone(),
+        },
+    )
+    .await
+    .expect_err("invalid draft should fail");
+    assert!(format!("{error:?}").contains("quantity must be greater than 0"));
+
+    let mut low_confidence_row = preview.draft_rows[1].clone();
+    low_confidence_row.confidence = "low".to_string();
+    low_confidence_row.warnings = vec!["Low confidence OCR.".to_string()];
+    let result = portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioDraftCommitRequest {
+            rows: vec![low_confidence_row],
+        },
+    )
+    .await
+    .expect("low confidence row can be committed");
+
+    assert_eq!(result.imported_count, 1);
+    assert_eq!(
+        portfolio::summary(&pool)
+            .await
+            .expect("summary")
+            .positions_count,
+        1
+    );
+}
+
+#[tokio::test]
+async fn portfolio_draft_commit_merges_without_deleting_existing_positions() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+    portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioDraftCommitRequest {
+            rows: preview.draft_rows,
+        },
+    )
+    .await
+    .expect("first commit");
+
+    let update = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: [
+            "symbol,name,quantity,average cost,currency,sector,market value",
+            "AAPL,Apple Inc.,3,110,USD,Technology,390",
+        ]
+        .join("\n"),
+        content_encoding: None,
+    })
+    .expect("update preview");
+    portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioDraftCommitRequest {
+            rows: update.draft_rows,
+        },
+    )
+    .await
+    .expect("merge commit");
+
+    let positions = portfolio::list_positions(&pool).await.expect("positions");
+    assert_eq!(positions.len(), 2);
+    assert!(positions.iter().any(|position| position.symbol == "MSFT"));
+    let apple = positions
+        .iter()
+        .find(|position| position.symbol == "AAPL")
+        .expect("AAPL");
+    assert_eq!(apple.quantity, 3.0);
+    assert_eq!(apple.average_cost, 110.0);
+}
+
+#[tokio::test]
+async fn portfolio_positions_can_be_edited_and_deleted() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+    portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioDraftCommitRequest {
+            rows: preview.draft_rows,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let updated = portfolio::update_position(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        "AAPL",
+        UpdatePortfolioPositionRequest {
+            name: Some("Apple Inc.".to_string()),
+            quantity: Some(4.0),
+            average_cost: Some(120.0),
+            currency: Some("USD".to_string()),
+            market: Some("US".to_string()),
+            sector: Some("Consumer Technology".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("update");
+    assert_eq!(updated.name, "Apple Inc.");
+    assert_eq!(updated.quantity, 4.0);
+    assert_eq!(updated.sector.as_deref(), Some("Consumer Technology"));
+
+    portfolio::delete_position(&pool, Arc::new(MockMarketDataProvider), "MSFT")
+        .await
+        .expect("delete");
+    let positions = portfolio::list_positions(&pool).await.expect("positions");
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].symbol, "AAPL");
+}
+
+#[tokio::test]
+async fn portfolio_summary_uses_cny_base_totals_and_marks_stale_fx_fallback() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: [
+            "symbol,name,quantity,average cost,currency,market,market value",
+            "AAPL,Apple,1,100,USD,US,100",
+            "0700.HK,Tencent,10,30,HKD,HK,300",
+            "600519,Maotai,1,1000,CNY,CN,1000",
+        ]
+        .join("\n"),
+        content_encoding: None,
+    })
+    .expect("preview");
+    portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(FxProvider { fail: false }),
+        PortfolioDraftCommitRequest {
+            rows: preview.draft_rows,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let summary = portfolio::summary_with_fx(&pool, Arc::new(FxProvider { fail: false }))
+        .await
+        .expect("summary");
+    assert_eq!(summary.base_currency, "CNY");
+    assert_eq!(summary.market_groups.len(), 3);
+    assert_eq!(summary.fx_stale_count, 0);
+    assert_eq!(
+        summary.total_market_value_base,
+        100.0 * 7.0 + 300.0 * 0.9 + 1000.0
+    );
+
+    let stale_summary = portfolio::summary_with_fx(&pool, Arc::new(FxProvider { fail: true }))
+        .await
+        .expect("stale summary");
+    assert_eq!(stale_summary.fx_stale_count, 2);
+    assert_eq!(
+        stale_summary.total_market_value_base,
+        summary.total_market_value_base
+    );
 }
 
 #[tokio::test]
@@ -1096,6 +1424,13 @@ fn empty_portfolio_summary() -> portfolio::PortfolioSummary {
         price_stale_count: 0,
         top_positions: Vec::new(),
         sectors: Vec::new(),
+        market_groups: Vec::new(),
+        base_currency: "CNY".to_string(),
+        total_market_value_base: 0.0,
+        total_cost_base: 0.0,
+        total_unrealized_pnl_base: 0.0,
+        fx_rates: Vec::new(),
+        fx_stale_count: 0,
         updated_at: "2026-01-01T00:00:00Z".to_string(),
     }
 }
@@ -1128,5 +1463,61 @@ struct FailingProvider;
 impl MarketDataProvider for FailingProvider {
     async fn quote(&self, symbol: &str) -> Result<MarketQuote, MarketDataError> {
         Err(MarketDataError::Provider(format!("{symbol} unavailable")))
+    }
+
+    async fn exchange_rate(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        Err(MarketDataError::Provider(format!(
+            "{from_currency}/{to_currency} unavailable"
+        )))
+    }
+}
+
+struct FxProvider {
+    fail: bool,
+}
+
+#[async_trait]
+impl MarketDataProvider for FxProvider {
+    async fn quote(&self, symbol: &str) -> Result<MarketQuote, MarketDataError> {
+        Ok(MarketQuote {
+            symbol: symbol.to_uppercase(),
+            price: 100.0,
+            currency: Some("USD".to_string()),
+            volume: None,
+            source: "test".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+    }
+
+    async fn exchange_rate(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        if self.fail && !from_currency.eq_ignore_ascii_case(to_currency) {
+            return Err(MarketDataError::Provider("fx unavailable".to_string()));
+        }
+
+        let rate = match (
+            from_currency.to_ascii_uppercase().as_str(),
+            to_currency.to_ascii_uppercase().as_str(),
+        ) {
+            (from, to) if from == to => 1.0,
+            ("USD", "CNY") => 7.0,
+            ("HKD", "CNY") => 0.9,
+            _ => 1.0,
+        };
+
+        Ok(ExchangeRate {
+            from_currency: from_currency.to_ascii_uppercase(),
+            to_currency: to_currency.to_ascii_uppercase(),
+            rate,
+            source: "test".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        })
     }
 }

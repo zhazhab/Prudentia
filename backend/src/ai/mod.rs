@@ -1,10 +1,9 @@
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use crate::research::ResearchAnalysis;
 use crate::{
     config::AppConfig,
     investment_system::InvestmentSystem,
@@ -13,6 +12,7 @@ use crate::{
     memo::Memo,
     portfolio::{PortfolioPosition, PortfolioSummary},
 };
+pub use crate::{portfolio::PortfolioImageRecognition, research::ResearchAnalysis};
 
 pub mod cli;
 pub mod mock;
@@ -43,6 +43,10 @@ pub trait AiProvider: Send + Sync {
         context: &PortfolioReviewContext,
         locale: Locale,
     ) -> Result<ResearchAnalysis, AiError>;
+    async fn recognize_portfolio_image(
+        &self,
+        image_path: &Path,
+    ) -> Result<PortfolioImageRecognition, AiError>;
 }
 
 #[derive(Debug, Error)]

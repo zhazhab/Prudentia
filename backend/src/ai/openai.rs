@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::{
     ai::{
@@ -8,8 +9,8 @@ use crate::{
             extract_json_object, investment_system_refinement_prompt, memo_extraction_prompt,
             portfolio_review_prompt, research_distillation_prompt, stock_snapshot_prompt,
         },
-        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioReviewContext,
-        ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
+        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioImageRecognition,
+        PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
     locale::Locale,
@@ -123,6 +124,15 @@ impl AiProvider for OpenAiCompatibleProvider {
     ) -> Result<ResearchAnalysis, AiError> {
         self.chat_json(portfolio_review_prompt(context, locale))
             .await
+    }
+
+    async fn recognize_portfolio_image(
+        &self,
+        _image_path: &Path,
+    ) -> Result<PortfolioImageRecognition, AiError> {
+        Err(AiError::Provider(
+            "portfolio image recognition requires the CLI provider with image support".to_string(),
+        ))
     }
 }
 

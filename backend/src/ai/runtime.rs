@@ -10,7 +10,8 @@ use crate::{
     ai::{
         cli::{CliProviderKind, CliSettings},
         provider_from_settings, AiError, InvestmentSystemRefinement, MemoExtraction,
-        PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
+        PortfolioImageRecognition, PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput,
+        StockSnapshotContext,
     },
     config::AppConfig,
     investment_system::InvestmentSystem,
@@ -225,6 +226,20 @@ impl AiRuntime {
             .clone();
         provider_from_settings(&settings)
             .review_portfolio_risk(context, locale)
+            .await
+    }
+
+    pub async fn recognize_portfolio_image(
+        &self,
+        image_path: &Path,
+    ) -> Result<PortfolioImageRecognition, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        provider_from_settings(&settings)
+            .recognize_portfolio_image(image_path)
             .await
     }
 }
