@@ -16,7 +16,6 @@ import type {
   MemoExtraction,
   PortfolioDraftCommitRequest,
   PortfolioDraftPreview,
-  PortfolioImageImportPreview,
   PortfolioImportMapping,
   PortfolioImportPreview,
   PortfolioImportResult,
@@ -174,11 +173,6 @@ export const api = {
     }),
   draftPortfolioImport: (payload: FilePayload & { mapping: PortfolioImportMapping }) =>
     request<PortfolioDraftPreview>("/api/portfolio/import/draft", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
-  previewPortfolioImageImport: (payload: ImagePayload) =>
-    request<PortfolioImageImportPreview>("/api/portfolio/import/image/preview", {
       method: "POST",
       body: JSON.stringify(payload)
     }),

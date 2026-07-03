@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
@@ -12,18 +12,23 @@ import {
   X
 } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { AiWebSocketClient, type AiWsServerMessage } from "../api/aiWs";
 import { api, type FilePayload, type ImagePayload } from "../api/client";
 import { EmptyState } from "../components/EmptyState";
 import { StatCard } from "../components/StatCard";
 import { useI18n, type TranslationKey } from "../i18n";
 import type {
   PortfolioDraftRow,
+  PortfolioImageImportPreview,
+  PortfolioImageImportTask,
   PortfolioImportMapping,
   PortfolioImportPreview,
   PortfolioPosition
 } from "../types/domain";
 import {
   canCommitDraftRows,
+  draftRowsForCommit,
+  emptyPortfolioDraftRow,
   draftRowHasWarnings,
   formatBaseMoney,
   formatMoney,
@@ -31,10 +36,24 @@ import {
   percent,
   positionEditDraft,
   positionUpdatePayload,
+  rowsWithDuplicateSymbolErrors,
   updateDraftRowField,
   type PortfolioDraftEditableField,
   type PositionEditDraft
 } from "./portfolioRules";
+
+type DraftTableRow = PortfolioDraftRow & {
+  source_id?: string;
+  source_label?: string;
+};
+
+type ImageImportTaskState = PortfolioImageImportTask & {
+  payload: ImagePayload;
+  source_label: string;
+  started_at: number | null;
+};
+
+type FileImportMode = "append" | "replace";
 
 export function PortfolioPage() {
   const { t } = useI18n();
@@ -45,11 +64,16 @@ export function PortfolioPage() {
   const [filePayload, setFilePayload] = useState<FilePayload | null>(null);
   const [preview, setPreview] = useState<PortfolioImportPreview | null>(null);
   const [mapping, setMapping] = useState<PortfolioImportMapping | null>(null);
-  const [draftRows, setDraftRows] = useState<PortfolioDraftRow[]>([]);
+  const [draftRows, setDraftRows] = useState<DraftTableRow[]>([]);
   const [draftWarnings, setDraftWarnings] = useState<string[]>([]);
   const [draftSource, setDraftSource] = useState<string | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ symbol: string; draft: PositionEditDraft } | null>(null);
+  const [imageTasks, setImageTasks] = useState<ImageImportTaskState[]>([]);
+  const aiWsRef = useRef<AiWebSocketClient | null>(null);
+  const imageTasksRef = useRef<ImageImportTaskState[]>([]);
+  const fileImportModeRef = useRef<FileImportMode>("replace");
+  const fileImportSourceIdRef = useRef<string | null>(null);
 
   const marketGroups = useMemo(
     () => (summary.data ? marketGroupsForDisplay(summary.data) : []),
@@ -66,12 +90,32 @@ export function PortfolioPage() {
   const draftHasRows = draftRows.length > 0;
   const draftCanCommit = canCommitDraftRows(draftRows);
 
+  useEffect(() => {
+    const client = new AiWebSocketClient();
+    aiWsRef.current = client;
+    const unsubscribe = client.onMessage(handleAiWsMessage);
+    client.connect().catch((error) => {
+      setDraftError(error instanceof Error ? error.message : String(error));
+    });
+
+    return () => {
+      unsubscribe();
+      client.close();
+      aiWsRef.current = null;
+    };
+  }, []);
+
   const previewPortfolioImport = useMutation({
     mutationFn: api.previewPortfolioImport,
     onSuccess: (result) => {
       setPreview(result);
       setMapping(result.suggested_mapping);
-      setDraftRows(result.draft_rows);
+      mergeDraftRows(
+        result.draft_rows,
+        fileImportSourceIdRef.current ?? makeRequestId(),
+        "file",
+        fileImportModeRef.current
+      );
       setDraftWarnings(result.validation_errors);
       setDraftSource("file");
       setDraftError(null);
@@ -82,24 +126,15 @@ export function PortfolioPage() {
   const draftPortfolioImport = useMutation({
     mutationFn: api.draftPortfolioImport,
     onSuccess: (result) => {
-      setDraftRows(result.draft_rows);
+      mergeDraftRows(
+        result.draft_rows,
+        fileImportSourceIdRef.current ?? makeRequestId(),
+        result.source,
+        fileImportModeRef.current
+      );
       setDraftWarnings(result.warnings);
       setDraftSource(result.source);
       setDraftError(null);
-    }
-  });
-
-  const previewImageImport = useMutation({
-    mutationFn: api.previewPortfolioImageImport,
-    onSuccess: (result) => {
-      setPreview(null);
-      setMapping(null);
-      setFilePayload(null);
-      setDraftRows(result.draft_rows);
-      setDraftWarnings(result.warnings);
-      setDraftSource(result.source);
-      setDraftError(null);
-      setImportOpen(true);
     }
   });
 
@@ -136,7 +171,6 @@ export function PortfolioPage() {
   const actionError =
     draftError ??
     previewPortfolioImport.error?.message ??
-    previewImageImport.error?.message ??
     commitDraft.error?.message ??
     refreshPrices.error?.message ??
     updatePosition.error?.message ??
@@ -148,6 +182,13 @@ export function PortfolioPage() {
       return;
     }
     const payload = await fileToPayload(file);
+    const mode =
+      draftRowsForCommit(draftRows).length > 0 && window.confirm(t("portfolio.appendFileConfirm"))
+        ? "append"
+        : "replace";
+    const sourceId = `file:${makeRequestId()}`;
+    fileImportModeRef.current = mode;
+    fileImportSourceIdRef.current = sourceId;
     setFilePayload(payload);
     previewPortfolioImport.mutate(payload);
   }
@@ -159,12 +200,35 @@ export function PortfolioPage() {
     draftPortfolioImport.mutate({ ...filePayload, mapping });
   }
 
-  async function handleImageFile(file: File | null) {
-    if (!file) {
+  async function handleImageFiles(files: FileList | File[] | null | undefined) {
+    if (!files?.length) {
       return;
     }
     setDraftError(null);
-    previewImageImport.mutate(await imageToPayload(file));
+    setPreview(null);
+    setMapping(null);
+    setFilePayload(null);
+    setImportOpen(true);
+
+    const tasks = await Promise.all(
+      Array.from(files).map(async (file) => {
+        const id = `image:${makeRequestId()}`;
+        return {
+          id,
+          file_name: file.name,
+          status: "queued" as const,
+          stage: null,
+          elapsed_ms: 0,
+          recognized_rows: 0,
+          error: null,
+          payload: await imageToPayload(file),
+          source_label: file.name,
+          started_at: null
+        };
+      })
+    );
+    updateImageTasks((current) => [...current, ...tasks]);
+    startQueuedImageImports();
   }
 
   async function handleClipboardImage() {
@@ -180,7 +244,7 @@ export function PortfolioPage() {
         const imageType = item.types.find((type) => type.startsWith("image/"));
         if (imageType) {
           const blob = await item.getType(imageType);
-          await handleImageFile(new File([blob], `clipboard.${extensionForMime(imageType)}`, { type: imageType }));
+          await handleImageFiles([new File([blob], `clipboard.${extensionForMime(imageType)}`, { type: imageType })]);
           return;
         }
       }
@@ -199,27 +263,160 @@ export function PortfolioPage() {
     }));
   }
 
+  function addManualDraftRow() {
+    mergeDraftRows([emptyPortfolioDraftRow()], `manual:${makeRequestId()}`, t("portfolio.manualEntry"), "append");
+  }
+
+  function mergeDraftRows(
+    rows: PortfolioDraftRow[],
+    sourceId: string,
+    sourceLabel: string,
+    mode: FileImportMode
+  ) {
+    const sourcedRows = rows.map((row) => ({
+      ...row,
+      source_id: sourceId,
+      source_label: sourceLabel
+    }));
+    setDraftRows((current) => {
+      const base = mode === "replace" ? [] : current.filter((row) => row.source_id !== sourceId);
+      return rowsWithDuplicateSymbolErrors([...base, ...sourcedRows]) as DraftTableRow[];
+    });
+  }
+
+  function updateImageTasks(updater: (tasks: ImageImportTaskState[]) => ImageImportTaskState[]) {
+    const next = updater(imageTasksRef.current);
+    imageTasksRef.current = next;
+    setImageTasks(next);
+  }
+
+  function startQueuedImageImports() {
+    const tasks = imageTasksRef.current;
+    const openSlots = Math.max(0, 2 - tasks.filter((task) => task.status === "running").length);
+    const queued = tasks.filter((task) => task.status === "queued").slice(0, openSlots);
+    queued.forEach(startImageImportTask);
+  }
+
+  function startImageImportTask(task: ImageImportTaskState) {
+    const startedAt = Date.now();
+    updateImageTasks((current) =>
+      current.map((item) =>
+        item.id === task.id ? { ...item, status: "running", stage: "queued", started_at: startedAt } : item
+      )
+    );
+    const client = aiWsRef.current;
+    if (!client) {
+      updateImageTaskFailure(task.id, "AI WebSocket is not connected");
+      startQueuedImageImports();
+      return;
+    }
+
+    client
+      .send({
+        type: "portfolio_image_import.start",
+        request_id: task.id,
+        payload: task.payload
+      })
+      .catch((error) => {
+        updateImageTaskFailure(task.id, error instanceof Error ? error.message : String(error));
+        startQueuedImageImports();
+      });
+  }
+
+  function handleAiWsMessage(message: AiWsServerMessage) {
+    if (message.type === "accepted") {
+      updateImageTask(message.request_id, { stage: "accepted" });
+      return;
+    }
+
+    if (message.type === "progress") {
+      updateImageTask(message.request_id, { stage: message.stage });
+      return;
+    }
+
+    if (message.type === "failed") {
+      updateImageTaskFailure(message.request_id, message.error);
+      startQueuedImageImports();
+      return;
+    }
+
+    if (message.type === "canceled") {
+      updateImageTask(message.request_id, { status: "canceled", stage: "canceled" });
+      startQueuedImageImports();
+      return;
+    }
+
+    if (message.type === "completed" && message.artifact_type === "portfolio_image_import.preview") {
+      const task = imageTasksRef.current.find((item) => item.id === message.request_id);
+      const previewResult = message.data as PortfolioImageImportPreview;
+      mergeDraftRows(previewResult.draft_rows, message.request_id, task?.source_label ?? "screenshot", "append");
+      setDraftWarnings((current) => [...current, ...previewResult.warnings]);
+      setDraftSource(previewResult.source);
+      updateImageTask(message.request_id, {
+        status: "completed",
+        stage: "completed",
+        recognized_rows: previewResult.draft_rows.length
+      });
+      startQueuedImageImports();
+    }
+  }
+
+  function updateImageTask(id: string, patch: Partial<ImageImportTaskState>) {
+    updateImageTasks((current) =>
+      current.map((task) =>
+        task.id === id
+          ? {
+              ...task,
+              ...patch,
+              elapsed_ms: task.started_at ? Date.now() - task.started_at : task.elapsed_ms
+            }
+          : task
+      )
+    );
+  }
+
+  function updateImageTaskFailure(id: string, error: string) {
+    updateImageTask(id, { status: "failed", stage: "failed", error });
+  }
+
+  function cancelImageTask(id: string) {
+    const task = imageTasksRef.current.find((item) => item.id === id);
+    if (task?.status === "running") {
+      aiWsRef.current?.send({ type: "cancel", request_id: id }).catch(() => undefined);
+    } else {
+      updateImageTask(id, { status: "canceled", stage: "canceled" });
+      startQueuedImageImports();
+    }
+  }
+
   function updateDraftRow(index: number, field: PortfolioDraftEditableField, value: string) {
     setDraftRows((current) =>
-      current.map((row, rowIndex) => (rowIndex === index ? updateDraftRowField(row, field, value) : row))
+      rowsWithDuplicateSymbolErrors(
+        current.map((row, rowIndex) => (rowIndex === index ? updateDraftRowField(row, field, value) : row))
+      ) as DraftTableRow[]
     );
   }
 
   function removeDraftRow(index: number) {
-    setDraftRows((current) => current.filter((_, rowIndex) => rowIndex !== index));
+    setDraftRows((current) => rowsWithDuplicateSymbolErrors(current.filter((_, rowIndex) => rowIndex !== index)) as DraftTableRow[]);
   }
 
   function clearDraft() {
+    imageTasksRef.current.forEach((task) => {
+      if (task.status === "running") {
+        aiWsRef.current?.send({ type: "cancel", request_id: task.id }).catch(() => undefined);
+      }
+    });
     setDraftRows([]);
     setDraftWarnings([]);
     setDraftSource(null);
     setDraftError(null);
+    updateImageTasks(() => []);
     setPreview(null);
     setMapping(null);
     setFilePayload(null);
     previewPortfolioImport.reset();
     draftPortfolioImport.reset();
-    previewImageImport.reset();
   }
 
   function startEditing(position: PortfolioPosition) {
@@ -287,6 +484,10 @@ export function PortfolioPage() {
           </div>
 
           <div className="import-source-row">
+            <button className="ghost-button" type="button" onClick={addManualDraftRow}>
+              <Edit3 size={18} />
+              {t("portfolio.addManualRow")}
+            </button>
             <label className="file-button">
               <FileUp size={18} />
               {t("portfolio.chooseFile")}
@@ -302,7 +503,8 @@ export function PortfolioPage() {
               <input
                 type="file"
                 accept="image/png,image/jpeg,image/jpg,image/webp"
-                onChange={(event) => handleImageFile(event.target.files?.[0] ?? null)}
+                multiple
+                onChange={(event) => handleImageFiles(event.target.files)}
               />
             </label>
             <button className="ghost-button" type="button" onClick={handleClipboardImage}>
@@ -312,9 +514,10 @@ export function PortfolioPage() {
             {draftSource ? <span className="pill">{draftSource}</span> : null}
           </div>
 
-          {previewImageImport.isPending || previewPortfolioImport.isPending || draftPortfolioImport.isPending ? (
+          {previewPortfolioImport.isPending || draftPortfolioImport.isPending ? (
             <div className="warning-box">{t("portfolio.preparingDraft")}</div>
           ) : null}
+          <ImageImportTasks tasks={imageTasks} onCancel={cancelImageTask} />
           {actionError ? <div className="warning-box">{actionError}</div> : null}
           {draftWarnings.length ? <div className="warning-box">{draftWarnings.join(" ")}</div> : null}
 
@@ -352,7 +555,7 @@ export function PortfolioPage() {
               className="primary-button"
               type="button"
               disabled={!draftCanCommit || commitDraft.isPending}
-              onClick={() => commitDraft.mutate({ rows: draftRows })}
+              onClick={() => commitDraft.mutate({ rows: draftRowsForCommit(rowsWithDuplicateSymbolErrors(draftRows)) })}
             >
               <Check size={18} />
               {t("portfolio.commitDraft")}
@@ -506,7 +709,7 @@ function DraftTable({
   onChange,
   onRemove
 }: {
-  rows: PortfolioDraftRow[];
+  rows: DraftTableRow[];
   onChange: (index: number, field: PortfolioDraftEditableField, value: string) => void;
   onRemove: (index: number) => void;
 }) {
@@ -521,6 +724,7 @@ function DraftTable({
       <table className="draft-table">
         <thead>
           <tr>
+            <th>{t("portfolio.source")}</th>
             {draftFields.map((field) => (
               <th key={field.key}>{t(field.labelKey)}</th>
             ))}
@@ -532,6 +736,7 @@ function DraftTable({
         <tbody>
           {rows.map((row, index) => (
             <tr key={`${row.symbol}-${index}`}>
+              <td>{row.source_label ?? "-"}</td>
               {draftFields.map((field) => (
                 <td key={field.key}>
                   <input
@@ -554,6 +759,45 @@ function DraftTable({
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function ImageImportTasks({
+  tasks,
+  onCancel
+}: {
+  tasks: ImageImportTaskState[];
+  onCancel: (id: string) => void;
+}) {
+  const { t } = useI18n();
+
+  if (!tasks.length) {
+    return null;
+  }
+
+  return (
+    <div className="image-task-list">
+      {tasks.map((task) => (
+        <div className="image-task-row" key={task.id}>
+          <div>
+            <strong>{task.file_name}</strong>
+            <span>{t(stageLabelKey(task.stage ?? task.status))}</span>
+            {task.error ? <em>{task.error}</em> : null}
+          </div>
+          <span className={task.status === "failed" ? "pill warning" : "pill"}>
+            {task.status === "completed"
+              ? t("portfolio.imageRowsRecognized", { count: task.recognized_rows })
+              : t(statusLabelKey(task.status))}
+          </span>
+          {task.status === "running" || task.status === "queued" ? (
+            <button className="ghost-button fit-button" type="button" onClick={() => onCancel(task.id)}>
+              <X size={16} />
+              {t("common.cancel")}
+            </button>
+          ) : null}
+        </div>
+      ))}
     </div>
   );
 }
@@ -603,6 +847,44 @@ const editFields: Array<{ key: keyof PositionEditDraft; labelKey: TranslationKey
   { key: "imported_market_value", labelKey: "portfolio.mapImportedMarketValue" },
   { key: "notes", labelKey: "portfolio.mapNotes" }
 ];
+
+function statusLabelKey(status: ImageImportTaskState["status"]): TranslationKey {
+  switch (status) {
+    case "queued":
+      return "portfolio.imageStatusQueued";
+    case "running":
+      return "portfolio.imageStatusRunning";
+    case "completed":
+      return "portfolio.imageStatusCompleted";
+    case "failed":
+      return "portfolio.imageStatusFailed";
+    case "canceled":
+      return "portfolio.imageStatusCanceled";
+  }
+}
+
+function stageLabelKey(stage: string): TranslationKey {
+  switch (stage) {
+    case "accepted":
+      return "portfolio.imageStageAccepted";
+    case "validating_image":
+      return "portfolio.imageStageValidating";
+    case "writing_temp_image":
+      return "portfolio.imageStageUploading";
+    case "recognizing_image":
+      return "portfolio.imageStageRecognizing";
+    case "normalizing_rows":
+      return "portfolio.imageStageNormalizing";
+    case "completed":
+      return "portfolio.imageStatusCompleted";
+    case "failed":
+      return "portfolio.imageStatusFailed";
+    case "canceled":
+      return "portfolio.imageStatusCanceled";
+    default:
+      return "portfolio.imageStatusQueued";
+  }
+}
 
 async function fileToPayload(file: File): Promise<FilePayload> {
   if (file.name.endsWith(".xlsx")) {
@@ -656,6 +938,10 @@ function mimeFromName(fileName: string) {
     return "image/webp";
   }
   return "image/png";
+}
+
+function makeRequestId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function number(value: number) {

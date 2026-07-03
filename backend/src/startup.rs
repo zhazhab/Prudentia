@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
-    ai::runtime::AiRuntime, decision, decision_delta, investment_system,
+    ai::runtime::AiRuntime, ai_ws, decision, decision_delta, investment_system,
     market_data::MarketDataProvider, memo, portfolio, profile, research, settings, state::AppState,
 };
 
@@ -30,6 +30,7 @@ pub fn build_router(
         .nest("/api/decision-deltas", decision_delta::routes())
         .nest("/api/research", research::routes())
         .nest("/api/settings", settings::routes())
+        .route("/api/ai/ws", get(ai_ws::ws_handler))
         .route("/api/profile", get(profile::get_profile))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())

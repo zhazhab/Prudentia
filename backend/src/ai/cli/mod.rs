@@ -1,11 +1,12 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::Stdio,
 };
 
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::{
@@ -111,26 +112,14 @@ where
     where
         T: DeserializeOwned + Send + 'static,
     {
-        let backend = self.backend.clone();
-        let settings = self.settings.clone();
-
-        tokio::task::spawn_blocking(move || run_cli_json(&backend, &settings, prompt))
-            .await
-            .map_err(|err| AiError::Provider(err.to_string()))?
+        run_cli_json(&self.backend, &self.settings, prompt).await
     }
 
     async fn run_image_json<T>(&self, image_path: PathBuf, prompt: String) -> Result<T, AiError>
     where
         T: DeserializeOwned + Send + 'static,
     {
-        let backend = self.backend.clone();
-        let settings = self.settings.clone();
-
-        tokio::task::spawn_blocking(move || {
-            run_cli_image_json(&backend, &settings, &image_path, prompt)
-        })
-        .await
-        .map_err(|err| AiError::Provider(err.to_string()))?
+        run_cli_image_json(&self.backend, &self.settings, &image_path, prompt).await
     }
 }
 
@@ -190,16 +179,20 @@ where
     }
 }
 
-fn run_cli_json<T, B>(backend: &B, settings: &CliSettings, prompt: String) -> Result<T, AiError>
+async fn run_cli_json<T, B>(
+    backend: &B,
+    settings: &CliSettings,
+    prompt: String,
+) -> Result<T, AiError>
 where
     T: DeserializeOwned,
     B: CliBackend,
 {
     let command_spec = backend.build_command(settings, prompt);
-    run_cli_command_json(backend, settings, command_spec)
+    run_cli_command_json(backend, settings, command_spec).await
 }
 
-fn run_cli_image_json<T, B>(
+async fn run_cli_image_json<T, B>(
     backend: &B,
     settings: &CliSettings,
     image_path: &Path,
@@ -216,10 +209,10 @@ where
     )?;
     let command_spec =
         backend.build_image_command(settings, image_path, Some(schema_file.path()), prompt);
-    run_cli_command_json(backend, settings, command_spec)
+    run_cli_command_json(backend, settings, command_spec).await
 }
 
-fn run_cli_command_json<T, B>(
+async fn run_cli_command_json<T, B>(
     backend: &B,
     settings: &CliSettings,
     command_spec: CliCommand,
@@ -230,7 +223,10 @@ where
 {
     let output = Command::new(&command_spec.program)
         .args(command_spec.args)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
         .output()
+        .await
         .map_err(|err| {
             AiError::Provider(format!(
                 "failed to run {} CLI. {} Error: {err}",

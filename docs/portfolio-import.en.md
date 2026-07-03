@@ -4,23 +4,22 @@
 
 The current import flow is:
 
-1. Upload CSV, TSV, or XLSX in the frontend.
-2. Backend parses headers and sample rows.
-3. Backend suggests field mappings.
-4. Backend generates editable draft rows from the mapping.
-5. User fixes draft fields, removes incorrect rows, and confirms the import.
-6. Backend merge-upserts by `symbol` without deleting existing holdings absent from the current draft.
-7. Backend recomputes market value, unrealized P/L, CNY-based weights, and the portfolio summary.
+1. Add rows manually, upload CSV/TSV/XLSX, or upload/paste one or more screenshots.
+2. Files can append to or replace the current draft; screenshots append to the current draft as recognition tasks finish.
+3. User fixes draft fields, removes incorrect rows, merges duplicate symbols, and confirms the import.
+4. Backend merge-upserts by `symbol` without deleting existing holdings absent from the current draft.
+5. Backend recomputes market value, unrealized P/L, CNY-based weights, and the portfolio summary.
 
 ## Screenshot Recognition Drafts
 
-The Portfolio page also supports uploaded or pasted PNG, JPG/JPEG, and WebP screenshots. Screenshot recognition uses the configured Codex CLI provider to extract visible holding rows into editable draft rows.
+The Portfolio page supports uploaded or pasted PNG, JPG/JPEG, and WebP screenshots. Screenshot recognition uses the shared AI WebSocket and the configured Codex CLI provider to extract visible holding rows into editable draft rows. Multiple screenshots can run as cancelable tasks and append into the same draft table.
 
 Screenshots and files share the same draft confirmation flow:
 
 - It does not create import history.
 - Nothing is written to SQLite before confirmation.
 - Confirmation merge-upserts positions by `symbol`.
+- Duplicate `symbol` rows must be merged or removed before confirmation.
 - Existing holdings that are absent from the current draft are not deleted.
 
 Users must verify recognized rows manually. Hidden rows, totals, and fields that are not visible in the screenshot are not inferred.

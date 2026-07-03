@@ -13,6 +13,7 @@ use prudentia_backend::{
         cli::{CliProviderKind, CliSettings},
         runtime::{AiProviderKind, AiRuntime, AiSettings, UpdateAiSettingsRequest},
     },
+    ai_ws::{AiWsClientMessage, AiWsServerMessage},
     database,
     decision::{self, CreateDecisionRequest},
     decision_delta::{self, DecisionDeltaReviewRequest, RefreshDecisionDeltasRequest},
@@ -23,8 +24,9 @@ use prudentia_backend::{
     },
     memo::{self, CreateMemoRequest},
     portfolio::{
-        self, PortfolioDraftCommitRequest, PortfolioImportCommitRequest,
-        PortfolioImportDraftRequest, PortfolioImportPreviewRequest, UpdatePortfolioPositionRequest,
+        self, PortfolioDraftCommitRequest, PortfolioImageImportPreviewRequest,
+        PortfolioImportCommitRequest, PortfolioImportDraftRequest, PortfolioImportPreviewRequest,
+        UpdatePortfolioPositionRequest,
     },
     profile, research, startup,
 };
@@ -69,6 +71,48 @@ fn sample_import_content() -> String {
         "MSFT,Microsoft,1,200,USD,Technology,220",
     ]
     .join("\n")
+}
+
+#[test]
+fn ai_ws_messages_round_trip_portfolio_image_import() {
+    let parsed: AiWsClientMessage = serde_json::from_value(serde_json::json!({
+        "type": "portfolio_image_import.start",
+        "request_id": "req-1",
+        "payload": {
+            "file_name": "positions.png",
+            "content": "aW1hZ2U=",
+            "content_encoding": "base64",
+            "mime_type": "image/png"
+        }
+    }))
+    .expect("client message");
+
+    match parsed {
+        AiWsClientMessage::PortfolioImageImportStart {
+            request_id,
+            payload:
+                PortfolioImageImportPreviewRequest {
+                    file_name,
+                    content_encoding,
+                    ..
+                },
+        } => {
+            assert_eq!(request_id, "req-1");
+            assert_eq!(file_name, "positions.png");
+            assert_eq!(content_encoding.as_deref(), Some("base64"));
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(AiWsServerMessage::Progress {
+        request_id: "req-1".to_string(),
+        stage: "recognizing_image".to_string(),
+    })
+    .expect("server message");
+
+    assert_eq!(serialized["type"], "progress");
+    assert_eq!(serialized["request_id"], "req-1");
+    assert_eq!(serialized["stage"], "recognizing_image");
 }
 
 async fn index_names(pool: &SqlitePool, table: &str) -> Vec<String> {
@@ -665,12 +709,27 @@ async fn decision_delta_review_adoption_and_profile_reward_process_not_returns()
 
 #[tokio::test]
 async fn portfolio_image_preview_returns_drafts_without_persisting_positions() {
-    let pool = test_pool().await;
-    let app = startup::build_router(
-        pool.clone(),
+    let preview = portfolio::preview_image_import(
         Arc::new(mock_ai_runtime()),
-        Arc::new(FailingProvider),
-    );
+        PortfolioImageImportPreviewRequest {
+            file_name: "positions.png".to_string(),
+            content: "aW1hZ2U=".to_string(),
+            content_encoding: Some("base64".to_string()),
+            mime_type: Some("image/png".to_string()),
+        },
+    )
+    .await
+    .expect("preview");
+
+    assert_eq!(preview.source, "codex_cli");
+    assert_eq!(preview.rows[0].symbol, "AAPL");
+    assert_eq!(preview.rows[0].confidence, "high");
+}
+
+#[tokio::test]
+async fn portfolio_image_preview_json_route_is_not_exposed() {
+    let pool = test_pool().await;
+    let app = startup::build_router(pool, Arc::new(mock_ai_runtime()), Arc::new(FailingProvider));
 
     let response = app
         .oneshot(
@@ -691,72 +750,41 @@ async fn portfolio_image_preview_returns_drafts_without_persisting_positions() {
         .await
         .expect("response");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), 1024 * 1024)
-        .await
-        .expect("body");
-    let preview: serde_json::Value = serde_json::from_slice(&body).expect("json");
-
-    assert_eq!(preview["source"], "codex_cli");
-    assert_eq!(preview["rows"][0]["symbol"], "AAPL");
-    assert_eq!(preview["rows"][0]["confidence"], "high");
-
-    let summary = portfolio::summary(&pool).await.expect("summary");
-    assert_eq!(summary.positions_count, 0);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn portfolio_image_preview_rejects_unsupported_image_type() {
-    let pool = test_pool().await;
-    let app = startup::build_router(pool, Arc::new(mock_ai_runtime()), Arc::new(FailingProvider));
+    let error = portfolio::preview_image_import(
+        Arc::new(mock_ai_runtime()),
+        PortfolioImageImportPreviewRequest {
+            file_name: "positions.gif".to_string(),
+            content: "aW1hZ2U=".to_string(),
+            content_encoding: Some("base64".to_string()),
+            mime_type: Some("image/gif".to_string()),
+        },
+    )
+    .await
+    .expect_err("unsupported image type");
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/portfolio/import/image/preview")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{
-                      "file_name":"positions.gif",
-                      "content":"aW1hZ2U=",
-                      "content_encoding":"base64",
-                      "mime_type":"image/gif"
-                    }"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(format!("{error:?}").contains("unsupported image type"));
 }
 
 #[tokio::test]
 async fn portfolio_image_preview_rejects_non_base64_content() {
-    let pool = test_pool().await;
-    let app = startup::build_router(pool, Arc::new(mock_ai_runtime()), Arc::new(FailingProvider));
+    let error = portfolio::preview_image_import(
+        Arc::new(mock_ai_runtime()),
+        PortfolioImageImportPreviewRequest {
+            file_name: "positions.png".to_string(),
+            content: "not-base64".to_string(),
+            content_encoding: Some("base64".to_string()),
+            mime_type: Some("image/png".to_string()),
+        },
+    )
+    .await
+    .expect_err("bad base64 content");
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/portfolio/import/image/preview")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{
-                      "file_name":"positions.png",
-                      "content":"not-base64",
-                      "content_encoding":"base64",
-                      "mime_type":"image/png"
-                    }"#,
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(format!("{error:?}").contains("Invalid"));
 }
 
 #[tokio::test]
@@ -840,6 +868,31 @@ async fn portfolio_draft_commit_blocks_invalid_rows_but_allows_low_confidence_ro
             .positions_count,
         1
     );
+}
+
+#[tokio::test]
+async fn portfolio_draft_commit_rejects_duplicate_symbols() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+    let mut duplicate = preview.draft_rows[0].clone();
+    duplicate.account = Some("Second account".to_string());
+
+    let error = portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioDraftCommitRequest {
+            rows: vec![preview.draft_rows[0].clone(), duplicate],
+        },
+    )
+    .await
+    .expect_err("duplicate symbols must fail");
+
+    assert!(format!("{error:?}").contains("duplicate symbol"));
 }
 
 #[tokio::test]

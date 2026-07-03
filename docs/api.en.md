@@ -87,7 +87,7 @@ Distillations, stock snapshots, and portfolio reviews are saved as research reco
 
 - `POST /api/portfolio/import/preview`
 - `POST /api/portfolio/import/draft`
-- `POST /api/portfolio/import/image/preview`
+- `GET /api/ai/ws` (WebSocket for screenshot recognition and future AI tasks)
 - `POST /api/portfolio/import/draft/commit`
 - `POST /api/portfolio/import/commit`
 - `GET /api/portfolio/positions`
@@ -123,18 +123,22 @@ After adjusting the mapping, regenerate draft rows:
 
 For `.xlsx` imports, send `content` as base64 and set `content_encoding` to `base64`.
 
-Screenshot recognition preview request:
+Screenshot recognition runs over the shared AI WebSocket. Send a text message:
 
 ```json
 {
-  "file_name": "positions.png",
-  "content": "base64-image-content",
-  "content_encoding": "base64",
-  "mime_type": "image/png"
+  "type": "portfolio_image_import.start",
+  "request_id": "import-1",
+  "payload": {
+    "file_name": "positions.png",
+    "content": "base64-image-content",
+    "content_encoding": "base64",
+    "mime_type": "image/png"
+  }
 }
 ```
 
-Screenshot recognition uses the configured Codex CLI provider to extract visible holding rows and returns the same `draft_rows` shape. File and screenshot drafts are written only after explicit user confirmation:
+The server emits `accepted`, `progress`, `completed`, `failed`, and `canceled` messages with the same `request_id`. Screenshot recognition uses the configured Codex CLI provider to extract visible holding rows; the `completed` message contains the same `draft_rows` shape. File and screenshot drafts are written only after explicit user confirmation:
 
 ```json
 {

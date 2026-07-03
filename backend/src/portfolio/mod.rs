@@ -1,4 +1,12 @@
-use std::{collections::HashMap, fs, io::Cursor, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    future::Future,
+    io::Cursor,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     extract::{Path, State},
@@ -235,7 +243,6 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/import/preview", post(preview_import))
         .route("/import/draft", post(draft_import_handler))
-        .route("/import/image/preview", post(preview_image_import_handler))
         .route("/import/draft/commit", post(commit_draft_handler))
         .route("/import/commit", post(commit_import_handler))
         .route("/positions", get(list_positions_handler))
@@ -278,13 +285,6 @@ async fn draft_import_handler(
     Json(request): Json<PortfolioImportDraftRequest>,
 ) -> AppResult<Json<PortfolioDraftPreview>> {
     Ok(Json(draft_from_import(request)?))
-}
-
-async fn preview_image_import_handler(
-    State(state): State<AppState>,
-    Json(request): Json<PortfolioImageImportPreviewRequest>,
-) -> AppResult<Json<PortfolioImageImportPreview>> {
-    Ok(Json(preview_image_import(state.ai.clone(), request).await?))
 }
 
 async fn commit_import_handler(
@@ -394,6 +394,20 @@ pub async fn preview_image_import(
     ai: Arc<AiRuntime>,
     request: PortfolioImageImportPreviewRequest,
 ) -> AppResult<PortfolioImageImportPreview> {
+    preview_image_import_with_progress(ai, request, |_| async {}).await
+}
+
+pub async fn preview_image_import_with_progress<F, Fut>(
+    ai: Arc<AiRuntime>,
+    request: PortfolioImageImportPreviewRequest,
+    mut progress: F,
+) -> AppResult<PortfolioImageImportPreview>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    progress("validating_image").await;
+
     if !matches!(request.content_encoding.as_deref(), Some("base64")) {
         return Err(AppError::bad_request(
             "image imports must send content_encoding=base64",
@@ -410,11 +424,14 @@ pub async fn preview_image_import(
         return Err(AppError::bad_request("image content is too large"));
     }
 
+    progress("writing_temp_image").await;
     let temp_image = TemporaryImportFile::write("prudentia-portfolio-image", extension, &bytes)?;
+    progress("recognizing_image").await;
     let recognition = ai
         .recognize_portfolio_image(&temp_image.path)
         .await
         .map_err(|err| AppError::internal(err.to_string()))?;
+    progress("normalizing_rows").await;
     let mut warnings = recognition.warnings;
     if recognition.rows.is_empty() && warnings.is_empty() {
         warnings.push("No visible holding rows were recognized.".to_string());
@@ -489,11 +506,21 @@ pub async fn commit_draft_rows(
 
     let mut validation_errors = Vec::new();
     let mut positions = Vec::new();
+    let mut seen_symbols = HashSet::new();
     for (index, row) in request.rows.into_iter().enumerate() {
         let row = normalize_draft_row(row);
         let errors = validate_draft_row(&row);
         if errors.is_empty() {
-            positions.push(position_from_draft_row(&row)?);
+            let position = position_from_draft_row(&row)?;
+            if !seen_symbols.insert(position.symbol.clone()) {
+                validation_errors.push(format!(
+                    "row {}: duplicate symbol {}",
+                    index + 1,
+                    position.symbol
+                ));
+            } else {
+                positions.push(position);
+            }
         } else {
             validation_errors.push(format!("row {}: {}", index + 1, errors.join("; ")));
         }

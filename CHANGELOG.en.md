@@ -8,6 +8,7 @@ All notable changes to Prudentia should be recorded here. Add the newest entry a
 
 - Improved the development startup script: `./scripts/dev.sh` now chooses available ports when defaults are occupied and wires the frontend to the selected backend URL.
 - Improved AI settings: the Settings page now shows only the fields needed for Mock, OpenAI-compatible, or CLI provider modes, and saving writes the configuration to the local `.env` by default.
+- Added a shared AI WebSocket channel and moved Portfolio screenshot recognition to cancelable multi-image tasks; import drafts now support default manual entry, source labels, blank-row filtering, and duplicate-symbol blocking.
 - Optimized Decision Delta performance: timeline now uses batched reads, detail snapshots default to the latest 90 entries, refresh reuses quote/FX lookups, key SQLite indexes were added, and the symbol filter is debounced.
 - Added the Decision Delta Timeline: buy/add, sell/trim, and watch/skip decisions can create actual legs plus baseline shadow legs, refresh snapshots from current market data, and show visible return-delta summaries, one-fork comparisons, review candidate adoption, and process-based profile rewards.
 - Polished the Portfolio holdings workflow: CSV/Excel/screenshot inputs now share one editable draft table, confirmed drafts merge-upsert by `symbol`, positions can be edited/deleted, US/HK/CN markets are inferred, summaries use a CNY base view, and market data providers refresh FX with stale fallback.

@@ -87,7 +87,7 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 
 - `POST /api/portfolio/import/preview`
 - `POST /api/portfolio/import/draft`
-- `POST /api/portfolio/import/image/preview`
+- `GET /api/ai/ws`（用于截图识别和未来 AI 任务的 WebSocket）
 - `POST /api/portfolio/import/draft/commit`
 - `POST /api/portfolio/import/commit`
 - `GET /api/portfolio/positions`
@@ -123,18 +123,22 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 
 导入 `.xlsx` 时，`content` 使用 base64，并将 `content_encoding` 设为 `base64`。
 
-截图识别预览请求：
+截图识别通过统一 AI WebSocket 进行。发送 text message：
 
 ```json
 {
-  "file_name": "positions.png",
-  "content": "base64-image-content",
-  "content_encoding": "base64",
-  "mime_type": "image/png"
+  "type": "portfolio_image_import.start",
+  "request_id": "import-1",
+  "payload": {
+    "file_name": "positions.png",
+    "content": "base64-image-content",
+    "content_encoding": "base64",
+    "mime_type": "image/png"
+  }
 }
 ```
 
-截图识别会调用已配置的 Codex CLI provider 识别可见持仓行，并返回同一套 `draft_rows`。文件和截图草稿都需要用户确认后才写入：
+服务端会用相同 `request_id` 返回 `accepted`、`progress`、`completed`、`failed`、`canceled` 消息。截图识别会调用已配置的 Codex CLI provider 识别可见持仓行；`completed` 消息中包含同一套 `draft_rows`。文件和截图草稿都需要用户确认后才写入：
 
 ```json
 {

@@ -1,6 +1,7 @@
 import type {
   MarketValueGroup,
   PortfolioDraftRow,
+  PortfolioImageImportTask,
   PortfolioPosition,
   PortfolioSummary
 } from "../types/domain";
@@ -38,7 +39,58 @@ export type PortfolioDraftEditableField =
   | "notes";
 
 export function canCommitDraftRows(rows: PortfolioDraftRow[]) {
-  return rows.length > 0 && rows.every((row) => row.errors.length === 0);
+  const rowsForCommit = draftRowsForCommit(rowsWithDuplicateSymbolErrors(rows));
+  return rowsForCommit.length > 0 && rowsForCommit.every((row) => row.errors.length === 0);
+}
+
+export function emptyPortfolioDraftRow(): PortfolioDraftRow {
+  return {
+    symbol: "",
+    name: "",
+    quantity: "",
+    average_cost: "",
+    currency: "",
+    account: null,
+    market: "",
+    sector: null,
+    imported_market_value: null,
+    notes: null,
+    confidence: "unknown",
+    warnings: [],
+    errors: []
+  };
+}
+
+export function draftRowsForCommit(rows: PortfolioDraftRow[]) {
+  return rows.filter((row) => !isBlankDraftRow(row)).map(normalizeDraftRowForCommit);
+}
+
+export function rowsWithDuplicateSymbolErrors(rows: PortfolioDraftRow[]) {
+  const symbolCounts = new Map<string, number>();
+  rows.forEach((row) => {
+    const symbol = normalizedSymbol(row);
+    if (symbol && !isBlankDraftRow(row)) {
+      symbolCounts.set(symbol, (symbolCounts.get(symbol) ?? 0) + 1);
+    }
+  });
+
+  return rows.map((row) => {
+    const withoutDuplicateError = row.errors.filter((error) => error !== duplicateSymbolError);
+    const symbol = normalizedSymbol(row);
+    const errors =
+      symbol && (symbolCounts.get(symbol) ?? 0) > 1
+        ? [...withoutDuplicateError, duplicateSymbolError]
+        : withoutDuplicateError;
+    return { ...row, errors };
+  });
+}
+
+export function imageImportQueueRunningCount(tasks: PortfolioImageImportTask[]) {
+  return tasks.filter((task) => task.status === "running").length;
+}
+
+export function imageImportQueueCanStart(tasks: PortfolioImageImportTask[], limit = 2) {
+  return imageImportQueueRunningCount(tasks) < limit;
 }
 
 export function marketGroupsForDisplay(summary: PortfolioSummary): MarketGroupDisplay[] {
@@ -116,6 +168,38 @@ export function updateDraftRowField(
   };
 }
 
+function normalizeDraftRowForCommit(row: PortfolioDraftRow): PortfolioDraftRow {
+  const next = {
+    symbol: row.symbol.trim().toUpperCase(),
+    name: row.name.trim(),
+    quantity: row.quantity.trim(),
+    average_cost: row.average_cost.trim(),
+    currency: row.currency.trim().toUpperCase(),
+    account: row.account?.trim() || null,
+    market: row.market.trim(),
+    sector: row.sector?.trim() || null,
+    imported_market_value: row.imported_market_value?.trim() || null,
+    notes: row.notes?.trim() || null,
+    confidence: row.confidence,
+    warnings: row.warnings,
+    errors: []
+  };
+  const existingErrors = row.errors.filter((error) => error !== duplicateSymbolError);
+  const duplicateErrors = row.errors.filter((error) => error === duplicateSymbolError);
+  const errors = [...validateDraftRow(next), ...existingErrors, ...duplicateErrors];
+  return {
+    ...next,
+    errors: [...new Set(errors)]
+  };
+}
+
+function isBlankDraftRow(row: PortfolioDraftRow) {
+  return draftFieldsForBlankCheck.every((field) => {
+    const value = row[field];
+    return value === null || value === undefined || String(value).trim() === "";
+  });
+}
+
 export function validateDraftRow(row: PortfolioDraftRow) {
   const errors: string[] = [];
   if (!row.symbol.trim()) {
@@ -165,6 +249,25 @@ const optionalDraftFields: PortfolioDraftEditableField[] = [
   "imported_market_value",
   "notes"
 ];
+
+const draftFieldsForBlankCheck: PortfolioDraftEditableField[] = [
+  "symbol",
+  "name",
+  "quantity",
+  "average_cost",
+  "currency",
+  "account",
+  "market",
+  "sector",
+  "imported_market_value",
+  "notes"
+];
+
+const duplicateSymbolError = "duplicate symbol must be merged before confirming";
+
+function normalizedSymbol(row: PortfolioDraftRow) {
+  return row.symbol.trim().toUpperCase();
+}
 
 function isPositiveNumber(value: string) {
   const parsed = Number(value.replaceAll(",", ""));

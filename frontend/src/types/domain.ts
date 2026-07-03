@@ -313,6 +313,18 @@ export interface PortfolioDraftRow {
   errors: string[];
 }
 
+export type PortfolioImageImportTaskStatus = "queued" | "running" | "completed" | "failed" | "canceled";
+
+export interface PortfolioImageImportTask {
+  id: string;
+  file_name: string;
+  status: PortfolioImageImportTaskStatus;
+  stage: string | null;
+  elapsed_ms: number;
+  recognized_rows: number;
+  error: string | null;
+}
+
 export interface PortfolioImageDraftRow {
   symbol: string;
   name: string;

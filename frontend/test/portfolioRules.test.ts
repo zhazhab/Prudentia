@@ -2,17 +2,61 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canCommitDraftRows,
+  draftRowsForCommit,
+  emptyPortfolioDraftRow,
   formatBaseMoney,
+  imageImportQueueCanStart,
+  imageImportQueueRunningCount,
   marketGroupsForDisplay,
   positionEditDraft,
+  rowsWithDuplicateSymbolErrors,
   updateDraftRowField
 } from "../src/pages/portfolioRules.ts";
-import type { PortfolioDraftRow, PortfolioPosition, PortfolioSummary } from "../src/types/domain.ts";
+import type {
+  PortfolioDraftRow,
+  PortfolioImageImportTask,
+  PortfolioPosition,
+  PortfolioSummary
+} from "../src/types/domain.ts";
 
 test("draft rows can be committed only when rows exist and no blocking errors remain", () => {
   assert.equal(canCommitDraftRows([]), false);
   assert.equal(canCommitDraftRows([draftRow({ errors: ["quantity must be greater than 0"] })]), false);
   assert.equal(canCommitDraftRows([draftRow({ confidence: "low", warnings: ["Low confidence"] })]), true);
+});
+
+test("blank manual draft rows are ignored before commit", () => {
+  const blank = emptyPortfolioDraftRow();
+  assert.equal(canCommitDraftRows([blank]), false);
+  assert.equal(canCommitDraftRows([draftRow(), blank]), true);
+  assert.deepEqual(draftRowsForCommit([blank, draftRow({ symbol: " msft " })]).map((row) => row.symbol), ["MSFT"]);
+});
+
+test("duplicate draft symbols are blocking errors", () => {
+  const rows = rowsWithDuplicateSymbolErrors([
+    draftRow({ symbol: "aapl", account: "Main" }),
+    draftRow({ symbol: "AAPL", account: "IRA" }),
+    draftRow({ symbol: "MSFT" })
+  ]);
+
+  assert.equal(canCommitDraftRows(rows), false);
+  assert.deepEqual(
+    rows.slice(0, 2).map((row) => row.errors),
+    [["duplicate symbol must be merged before confirming"], ["duplicate symbol must be merged before confirming"]]
+  );
+  assert.deepEqual(rows[2].errors, []);
+});
+
+test("image import queue enforces a running limit", () => {
+  const tasks: PortfolioImageImportTask[] = [
+    imageTask({ status: "running" }),
+    imageTask({ id: "second", status: "running" }),
+    imageTask({ id: "third", status: "queued" })
+  ];
+
+  assert.equal(imageImportQueueRunningCount(tasks), 2);
+  assert.equal(imageImportQueueCanStart(tasks, 2), false);
+  assert.equal(imageImportQueueCanStart(tasks.slice(1), 2), true);
 });
 
 test("market groups display native values and cny weights in sorted order", () => {
@@ -113,6 +157,19 @@ function draftRow(overrides: Partial<PortfolioDraftRow> = {}): PortfolioDraftRow
     confidence: "high",
     warnings: [],
     errors: [],
+    ...overrides
+  };
+}
+
+function imageTask(overrides: Partial<PortfolioImageImportTask> = {}): PortfolioImageImportTask {
+  return {
+    id: "first",
+    file_name: "positions.png",
+    status: "queued",
+    stage: null,
+    elapsed_ms: 0,
+    recognized_rows: 0,
+    error: null,
     ...overrides
   };
 }

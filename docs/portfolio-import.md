@@ -4,23 +4,22 @@
 
 当前导入流程：
 
-1. 在前端上传 CSV、TSV 或 XLSX。
-2. 后端解析 headers 和 sample rows。
-3. 后端建议字段映射。
-4. 后端基于 mapping 生成可编辑草稿行。
-5. 用户修正草稿中的字段、删除错误行，并确认导入。
-6. 后端按 `symbol` 合并写入 SQLite，不删除本次未出现的旧持仓。
-7. 后端重新计算 market value、unrealized P/L、CNY 口径权重和 portfolio summary。
+1. 手动新增行、上传 CSV/TSV/XLSX，或上传/粘贴一张或多张截图。
+2. 文件可以追加到当前草稿或替换当前草稿；截图识别任务完成后会追加到同一张草稿表。
+3. 用户修正草稿中的字段、删除错误行、合并重复代码，并确认导入。
+4. 后端按 `symbol` 合并写入 SQLite，不删除本次未出现的旧持仓。
+5. 后端重新计算 market value、unrealized P/L、CNY 口径权重和 portfolio summary。
 
 ## 截图识别草稿
 
-Portfolio 页也支持上传或粘贴 PNG、JPG/JPEG、WebP 截图进行识别。截图识别会调用已配置的 Codex CLI provider，把截图中可见的持仓行提取为可编辑草稿。
+Portfolio 页支持上传或粘贴 PNG、JPG/JPEG、WebP 截图进行识别。截图识别通过统一 AI WebSocket 调用已配置的 Codex CLI provider，把截图中可见的持仓行提取为可编辑草稿。多张截图会作为可取消任务追加到同一张草稿表。
 
 截图和文件共用同一套草稿确认流程：
 
 - 不创建导入历史。
 - 确认前不写入 SQLite。
 - 确认后按 `symbol` 合并更新或新增持仓。
+- 重复 `symbol` 行需要先合并或删除，才能确认。
 - 不会删除本次草稿中没有出现的旧持仓。
 
 识别结果需要用户自行核对。截图中的隐藏行、合计行或不可见字段不会被推断。
