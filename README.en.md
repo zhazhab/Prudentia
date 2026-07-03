@@ -57,6 +57,7 @@ cargo run -p prudentia-backend
 ```
 
 The backend listens on `http://127.0.0.1:8080` by default and stores local data in `data/prudentia.sqlite`.
+When starting both services with `./scripts/dev.sh` or `make start`, the script automatically selects the next available port if a default port is occupied and prints the actual URLs.
 
 Useful commands:
 
@@ -73,6 +74,7 @@ npm --prefix frontend run dev
 ```
 
 The frontend dev server listens on `http://127.0.0.1:5173` and proxies `/api` to the backend.
+When started through `./scripts/dev.sh`, the frontend is wired to the backend port chosen by the script.
 
 Useful commands:
 

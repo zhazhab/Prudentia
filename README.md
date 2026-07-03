@@ -57,6 +57,7 @@ cargo run -p prudentia-backend
 ```
 
 后端默认监听 `http://127.0.0.1:8080`，本地数据存储在 `data/prudentia.sqlite`。
+使用 `./scripts/dev.sh` 或 `make start` 同时启动前后端时，如果默认端口被占用，脚本会自动选择下一个可用端口并在终端输出实际地址。
 
 常用命令：
 
@@ -73,6 +74,7 @@ npm --prefix frontend run dev
 ```
 
 前端开发服务器默认监听 `http://127.0.0.1:5173`，并将 `/api` 代理到后端。
+通过 `./scripts/dev.sh` 启动时，前端会自动连接脚本选出的后端端口。
 
 常用命令：
 
