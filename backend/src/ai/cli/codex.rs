@@ -61,8 +61,8 @@ fn base_exec_args(settings: &CliSettings) -> Vec<String> {
         "--skip-git-repo-check".to_string(),
         "--sandbox".to_string(),
         "read-only".to_string(),
-        "--ask-for-approval".to_string(),
-        "never".to_string(),
+        "-c".to_string(),
+        "approval_policy=never".to_string(),
     ];
 
     if let Some(model) = settings
@@ -111,8 +111,8 @@ mod tests {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
+                "-c",
+                "approval_policy=never",
                 "--model",
                 "gpt-5.4",
                 "--profile",
@@ -145,8 +145,8 @@ mod tests {
                 "--skip-git-repo-check",
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
+                "-c",
+                "approval_policy=never",
                 "--model",
                 "gpt-5.4",
                 "--profile",
