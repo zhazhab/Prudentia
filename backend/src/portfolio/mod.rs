@@ -5,7 +5,7 @@ use std::{
     io::Cursor,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -406,6 +406,12 @@ where
     F: FnMut(&'static str) -> Fut,
     Fut: Future<Output = ()>,
 {
+    let started_at = Instant::now();
+    tracing::info!(
+        file_name = %request.file_name,
+        mime_type = request.mime_type.as_deref().unwrap_or("unknown"),
+        "portfolio image import preview started"
+    );
     progress("validating_image").await;
 
     if !matches!(request.content_encoding.as_deref(), Some("base64")) {
@@ -423,14 +429,29 @@ where
     if bytes.len() > MAX_IMAGE_IMPORT_BYTES {
         return Err(AppError::bad_request("image content is too large"));
     }
+    tracing::info!(
+        file_name = %request.file_name,
+        mime_type = request.mime_type.as_deref().unwrap_or("unknown"),
+        extension,
+        image_bytes = bytes.len(),
+        "portfolio image import payload validated"
+    );
 
     progress("writing_temp_image").await;
     let temp_image = TemporaryImportFile::write("prudentia-portfolio-image", extension, &bytes)?;
     progress("recognizing_image").await;
+    let recognition_started_at = Instant::now();
     let recognition = ai
         .recognize_portfolio_image(&temp_image.path)
         .await
         .map_err(|err| AppError::internal(err.to_string()))?;
+    tracing::info!(
+        file_name = %request.file_name,
+        elapsed_ms = recognition_started_at.elapsed().as_millis(),
+        recognized_rows = recognition.rows.len(),
+        recognition_warnings = recognition.warnings.len(),
+        "portfolio image recognition provider returned"
+    );
     progress("normalizing_rows").await;
     let mut warnings = recognition.warnings;
     if recognition.rows.is_empty() && warnings.is_empty() {
@@ -447,6 +468,16 @@ where
         .cloned()
         .map(draft_row_from_image_row)
         .collect::<Vec<_>>();
+    let row_count = draft_rows.len();
+    let error_count = draft_rows.iter().map(|row| row.errors.len()).sum::<usize>();
+    tracing::info!(
+        file_name = %request.file_name,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        row_count,
+        warning_count = warnings.len(),
+        error_count,
+        "portfolio image import preview normalized"
+    );
 
     Ok(PortfolioImageImportPreview {
         draft_rows,

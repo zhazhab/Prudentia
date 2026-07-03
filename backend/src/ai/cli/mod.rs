@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Stdio,
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -221,13 +222,32 @@ where
     T: DeserializeOwned,
     B: CliBackend,
 {
+    let started_at = Instant::now();
+    let has_image = command_spec.args.iter().any(|arg| arg == "--image");
+    let has_schema = command_spec.args.iter().any(|arg| arg == "--output-schema");
+    let arg_count = command_spec.args.len();
+    tracing::info!(
+        provider = backend.kind().as_str(),
+        program = %command_spec.program,
+        arg_count,
+        has_image,
+        has_schema,
+        "AI CLI command started"
+    );
     let output = Command::new(&command_spec.program)
-        .args(command_spec.args)
+        .args(&command_spec.args)
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .output()
         .await
         .map_err(|err| {
+            tracing::warn!(
+                provider = backend.kind().as_str(),
+                program = %command_spec.program,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                error = %err,
+                "AI CLI command failed to start"
+            );
             AiError::Provider(format!(
                 "failed to run {} CLI. {} Error: {err}",
                 backend.kind().as_str(),
@@ -237,15 +257,39 @@ where
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            provider = backend.kind().as_str(),
+            program = %command_spec.program,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            status = output.status.code().unwrap_or_default(),
+            stderr_bytes = output.stderr.len(),
+            stdout_bytes = output.stdout.len(),
+            "AI CLI command exited with failure"
+        );
         return Err(AiError::Provider(format!(
             "{} CLI failed. {} stderr: {stderr}",
             backend.kind().as_str(),
             backend.auth_hint(settings)
         )));
     }
+    tracing::info!(
+        provider = backend.kind().as_str(),
+        program = %command_spec.program,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        status = output.status.code().unwrap_or_default(),
+        stdout_bytes = output.stdout.len(),
+        stderr_bytes = output.stderr.len(),
+        "AI CLI command completed"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json = extract_json_object(stdout.trim()).ok_or_else(|| {
+        tracing::warn!(
+            provider = backend.kind().as_str(),
+            program = %command_spec.program,
+            stdout_bytes = output.stdout.len(),
+            "AI CLI command returned no JSON object"
+        );
         AiError::Provider(format!(
             "{} CLI did not return a JSON object",
             backend.kind().as_str()
@@ -253,6 +297,12 @@ where
     })?;
 
     serde_json::from_str(json).map_err(|err| {
+        tracing::warn!(
+            provider = backend.kind().as_str(),
+            program = %command_spec.program,
+            error = %err,
+            "AI CLI JSON parse failed"
+        );
         AiError::Provider(format!(
             "failed to parse {} CLI JSON response: {err}. response: {json}",
             backend.kind().as_str()
