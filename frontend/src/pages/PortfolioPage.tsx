@@ -12,8 +12,9 @@ import {
   X
 } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { AiWebSocketClient, type AiWsServerMessage } from "../api/aiWs";
+import type { AiWsServerMessage } from "../api/aiWs";
 import { api, type FilePayload, type ImagePayload } from "../api/client";
+import { useAiWebSocket } from "../api/useAiWebSocket";
 import { EmptyState } from "../components/EmptyState";
 import { StatCard } from "../components/StatCard";
 import { useI18n, type TranslationKey } from "../i18n";
@@ -70,7 +71,7 @@ export function PortfolioPage() {
   const [draftError, setDraftError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ symbol: string; draft: PositionEditDraft } | null>(null);
   const [imageTasks, setImageTasks] = useState<ImageImportTaskState[]>([]);
-  const aiWsRef = useRef<AiWebSocketClient | null>(null);
+  const { session: aiWs } = useAiWebSocket();
   const imageTasksRef = useRef<ImageImportTaskState[]>([]);
   const fileImportModeRef = useRef<FileImportMode>("replace");
   const fileImportSourceIdRef = useRef<string | null>(null);
@@ -91,19 +92,14 @@ export function PortfolioPage() {
   const draftCanCommit = canCommitDraftRows(draftRows);
 
   useEffect(() => {
-    const client = new AiWebSocketClient();
-    aiWsRef.current = client;
-    const unsubscribe = client.onMessage(handleAiWsMessage);
-    client.connect().catch((error) => {
-      setDraftError(error instanceof Error ? error.message : String(error));
-    });
+    return aiWs.onMessage(handleAiWsMessage);
+  }, [aiWs]);
 
+  useEffect(() => {
     return () => {
-      unsubscribe();
-      client.close();
-      aiWsRef.current = null;
+      cancelRunningImageTasks();
     };
-  }, []);
+  }, [aiWs]);
 
   const previewPortfolioImport = useMutation({
     mutationFn: api.previewPortfolioImport,
@@ -304,14 +300,7 @@ export function PortfolioPage() {
         item.id === task.id ? { ...item, status: "running", stage: "queued", started_at: startedAt } : item
       )
     );
-    const client = aiWsRef.current;
-    if (!client) {
-      updateImageTaskFailure(task.id, "AI WebSocket is not connected");
-      startQueuedImageImports();
-      return;
-    }
-
-    client
+    aiWs
       .send({
         type: "portfolio_image_import.start",
         request_id: task.id,
@@ -382,7 +371,7 @@ export function PortfolioPage() {
   function cancelImageTask(id: string) {
     const task = imageTasksRef.current.find((item) => item.id === id);
     if (task?.status === "running") {
-      aiWsRef.current?.send({ type: "cancel", request_id: id }).catch(() => undefined);
+      aiWs.send({ type: "cancel", request_id: id }).catch(() => undefined);
     } else {
       updateImageTask(id, { status: "canceled", stage: "canceled" });
       startQueuedImageImports();
@@ -401,12 +390,16 @@ export function PortfolioPage() {
     setDraftRows((current) => rowsWithDuplicateSymbolErrors(current.filter((_, rowIndex) => rowIndex !== index)) as DraftTableRow[]);
   }
 
-  function clearDraft() {
+  function cancelRunningImageTasks() {
     imageTasksRef.current.forEach((task) => {
       if (task.status === "running") {
-        aiWsRef.current?.send({ type: "cancel", request_id: task.id }).catch(() => undefined);
+        aiWs.send({ type: "cancel", request_id: task.id }).catch(() => undefined);
       }
     });
+  }
+
+  function clearDraft() {
+    cancelRunningImageTasks();
     setDraftRows([]);
     setDraftWarnings([]);
     setDraftSource(null);

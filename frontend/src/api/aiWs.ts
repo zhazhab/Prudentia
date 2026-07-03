@@ -22,10 +22,13 @@ export type AiWsServerMessage =
   | { type: "canceled"; request_id: string };
 
 export type AiWsMessageHandler = (message: AiWsServerMessage) => void;
+export type AiWebSocketConnection = Pick<AiWebSocketClient, "connect" | "onMessage" | "send" | "close">;
 
 export class AiWebSocketClient {
   private socket: WebSocket | null = null;
   private opening: Promise<void> | null = null;
+  private openingResolve: (() => void) | null = null;
+  private attemptId = 0;
   private readonly handlers = new Set<AiWsMessageHandler>();
   private readonly url: string;
 
@@ -41,16 +44,30 @@ export class AiWebSocketClient {
       return this.opening;
     }
 
+    const attemptId = ++this.attemptId;
     this.opening = new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(this.url);
       this.socket = socket;
+      this.openingResolve = resolve;
+
+      const isCurrentSocket = () => this.attemptId === attemptId && this.socket === socket;
+      const clearOpening = () => {
+        if (isCurrentSocket()) {
+          this.opening = null;
+          this.openingResolve = null;
+        }
+      };
 
       socket.onopen = () => {
-        this.opening = null;
+        clearOpening();
         resolve();
       };
       socket.onerror = () => {
-        this.opening = null;
+        if (!isCurrentSocket()) {
+          return;
+        }
+        clearOpening();
+        this.socket = null;
         reject(new Error("AI WebSocket connection failed"));
       };
       socket.onmessage = (event) => {
@@ -58,9 +75,14 @@ export class AiWebSocketClient {
         this.handlers.forEach((handler) => handler(message));
       };
       socket.onclose = () => {
-        this.opening = null;
-        if (this.socket === socket) {
-          this.socket = null;
+        if (!isCurrentSocket()) {
+          return;
+        }
+        const wasOpening = this.opening !== null;
+        clearOpening();
+        this.socket = null;
+        if (wasOpening) {
+          reject(new Error("AI WebSocket connection closed before it opened"));
         }
       };
     });
@@ -70,7 +92,9 @@ export class AiWebSocketClient {
 
   onMessage(handler: AiWsMessageHandler) {
     this.handlers.add(handler);
-    return () => this.handlers.delete(handler);
+    return () => {
+      this.handlers.delete(handler);
+    };
   }
 
   async send(message: AiWsClientMessage) {
@@ -82,9 +106,59 @@ export class AiWebSocketClient {
   }
 
   close() {
+    this.attemptId += 1;
+    this.openingResolve?.();
+    this.opening = null;
+    this.openingResolve = null;
     this.socket?.close();
     this.socket = null;
-    this.opening = null;
+  }
+}
+
+export class AiWebSocketSession {
+  private client: AiWebSocketConnection | null = null;
+  private unsubscribe: (() => void) | null = null;
+  private readonly handlers = new Set<AiWsMessageHandler>();
+  private readonly createClient: () => AiWebSocketConnection;
+
+  constructor(createClient: () => AiWebSocketConnection = () => new AiWebSocketClient()) {
+    this.createClient = createClient;
+  }
+
+  hasClient() {
+    return this.client !== null;
+  }
+
+  getClient() {
+    if (!this.client) {
+      this.client = this.createClient();
+      this.unsubscribe = this.client.onMessage((message) => {
+        this.handlers.forEach((handler) => handler(message));
+      });
+    }
+    return this.client;
+  }
+
+  onMessage(handler: AiWsMessageHandler) {
+    this.handlers.add(handler);
+    return () => {
+      this.handlers.delete(handler);
+    };
+  }
+
+  connect() {
+    return this.getClient().connect();
+  }
+
+  send(message: AiWsClientMessage) {
+    return this.getClient().send(message);
+  }
+
+  close() {
+    this.unsubscribe?.();
+    this.client?.close();
+    this.unsubscribe = null;
+    this.client = null;
   }
 }
 
@@ -102,17 +176,22 @@ export function parseAiWsMessage(raw: string): AiWsServerMessage {
   return parsed as AiWsServerMessage;
 }
 
-export function websocketUrl(apiBase: string, path: string) {
-  if (!apiBase) {
+export function websocketUrl(apiBase: string, path: string, pageOrigin = currentPageOrigin()) {
+  const base = apiBase || pageOrigin;
+  if (!base) {
     return path;
   }
 
   const normalizedPath = path.replace(/^\/+/, "");
-  const url = new URL(normalizedPath, apiBase.endsWith("/") ? apiBase : `${apiBase}/`);
+  const url = new URL(normalizedPath, base.endsWith("/") ? base : `${base}/`);
   if (url.protocol === "https:") {
     url.protocol = "wss:";
   } else if (url.protocol === "http:") {
     url.protocol = "ws:";
   }
   return url.toString();
+}
+
+function currentPageOrigin() {
+  return globalThis.location?.origin ?? "";
 }
