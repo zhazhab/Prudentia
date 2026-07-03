@@ -118,7 +118,7 @@ AI_CLI_MODEL=
 AI_CLI_PROFILE=
 ```
 
-也可以在应用的 Settings 页面编辑 AI 配置。运行时配置会立即生效；启用 “write .env” 后会写入 `.env`，后端重启后继续生效。
+也可以在应用的 Settings 页面编辑 AI 配置。保存后配置会立即生效，并写入本地 `.env`，后端重启后继续保留。
 
 ## 导入模板
 

@@ -365,13 +365,17 @@ const translations = {
     "settings.cliPath": "CLI path",
     "settings.cliModel": "CLI model override",
     "settings.cliProfile": "CLI profile",
+    "settings.cliAdvanced": "Advanced CLI options",
     "settings.cliLoginCommand": "CLI login command",
     "settings.cliHelp": "For Codex, run this in a terminal once, finish the browser/device-code flow, then choose CLI as the provider.",
     "settings.persist": "Write these settings to .env",
+    "settings.localSaveNote": "Saving writes these settings to the local .env file and applies them immediately.",
     "settings.save": "Save AI settings",
     "settings.saved": "Settings saved",
     "settings.envNote": "Runtime settings take effect immediately. Writing .env makes them survive a backend restart.",
     "settings.mockNote": "Mock mode stays fully local and deterministic.",
+    "settings.openaiNote": "Use an OpenAI-compatible endpoint when you want hosted model calls through the backend.",
+    "settings.cliNote": "Use the Codex CLI provider when you want Prudentia to reuse your local device-code login.",
   },
   zh: {
     "app.subtitle": "投资操作系统",
@@ -670,12 +674,16 @@ const translations = {
     "settings.cliPath": "CLI 路径",
     "settings.cliModel": "CLI 模型覆盖",
     "settings.cliProfile": "CLI profile",
+    "settings.cliAdvanced": "CLI 高级选项",
     "settings.cliLoginCommand": "CLI 登录命令",
     "settings.cliHelp": "如果使用 Codex，先在终端运行一次该命令，完成浏览器/device-code 登录，再选择 CLI provider。",
     "settings.persist": "写入 .env 持久化",
+    "settings.localSaveNote": "保存会写入本地 .env，并立即应用到当前后端运行时。",
     "settings.save": "保存 AI 设置",
     "settings.saved": "设置已保存",
     "settings.envNote": "运行时设置会立即生效。写入 .env 后，后端重启仍会保留。",
-    "settings.mockNote": "Mock 模式完全本地、确定性输出。"
+    "settings.mockNote": "Mock 模式完全本地、确定性输出。",
+    "settings.openaiNote": "选择 OpenAI-compatible 后，后端会通过兼容接口调用托管模型。",
+    "settings.cliNote": "选择 CLI provider 后，Prudentia 会复用你本机 Codex CLI 的 device-code 登录。"
   }
 } as const;

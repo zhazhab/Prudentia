@@ -3,8 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Save } from "lucide-react";
 import { api } from "../api/client";
 import { EmptyState } from "../components/EmptyState";
-import { useI18n } from "../i18n";
+import { useI18n, type TranslationKey } from "../i18n";
 import type { UpdateAiSettings } from "../types/domain";
+import { aiSettingsPayload, providerMode, type AiProviderMode } from "./settingsRules";
 
 export function SettingsPage() {
   const { t } = useI18n();
@@ -20,8 +21,10 @@ export function SettingsPage() {
     cli_model: "",
     cli_profile: "",
     openai_api_key: "",
-    persist_to_env: false
+    persist_to_env: true
   });
+  const mode = providerMode(draft.provider);
+  const helpCopy = providerHelpCopy(mode);
 
   useEffect(() => {
     if (!settings.data) {
@@ -36,7 +39,7 @@ export function SettingsPage() {
       cli_model: settings.data.cli_model ?? "",
       cli_profile: settings.data.cli_profile ?? "",
       openai_api_key: "",
-      persist_to_env: false
+      persist_to_env: true
     });
   }, [settings.data]);
 
@@ -51,7 +54,7 @@ export function SettingsPage() {
   function submit(event: FormEvent) {
     event.preventDefault();
     setSaved(false);
-    save.mutate(draft);
+    save.mutate(aiSettingsPayload(draft));
   }
 
   return (
@@ -76,82 +79,83 @@ export function SettingsPage() {
           </select>
         </label>
 
-        <div className="settings-grid">
-          <label>
-            <span>{t("settings.openaiBaseUrl")}</span>
-            <input
-              value={draft.openai_base_url ?? ""}
-              onChange={(event) => setDraft({ ...draft, openai_base_url: event.target.value })}
-            />
-          </label>
-          <label>
-            <span>{t("settings.openaiModel")}</span>
-            <input
-              value={draft.openai_model ?? ""}
-              onChange={(event) => setDraft({ ...draft, openai_model: event.target.value })}
-            />
-          </label>
-          <label>
-            <span>{t("settings.openaiApiKey")}</span>
-            <input
-              type="password"
-              value={draft.openai_api_key ?? ""}
-              placeholder={t("settings.openaiApiKeyPlaceholder")}
-              onChange={(event) => setDraft({ ...draft, openai_api_key: event.target.value })}
-            />
-            <em className="field-help">
-              {settings.data?.has_openai_api_key ? t("settings.keyConfigured") : t("settings.keyMissing")}
-            </em>
-          </label>
-        </div>
+        {mode === "openai" ? (
+          <div className="settings-provider-section">
+            <div className="settings-grid">
+              <label>
+                <span>{t("settings.openaiBaseUrl")}</span>
+                <input
+                  required
+                  value={draft.openai_base_url ?? ""}
+                  onChange={(event) => setDraft({ ...draft, openai_base_url: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t("settings.openaiModel")}</span>
+                <input
+                  required
+                  value={draft.openai_model ?? ""}
+                  onChange={(event) => setDraft({ ...draft, openai_model: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t("settings.openaiApiKey")}</span>
+                <input
+                  type="password"
+                  value={draft.openai_api_key ?? ""}
+                  placeholder={t("settings.openaiApiKeyPlaceholder")}
+                  onChange={(event) => setDraft({ ...draft, openai_api_key: event.target.value })}
+                />
+                <em className="field-help">
+                  {settings.data?.has_openai_api_key ? t("settings.keyConfigured") : t("settings.keyMissing")}
+                </em>
+              </label>
+            </div>
+          </div>
+        ) : null}
 
-        <div className="settings-grid">
-          <label>
-            <span>{t("settings.cliProvider")}</span>
-            <select
-              value={draft.cli_provider ?? "codex"}
-              onChange={(event) => setDraft({ ...draft, cli_provider: event.target.value })}
-            >
-              <option value="codex">{t("settings.cliProviderCodex")}</option>
-            </select>
-          </label>
-          <label>
-            <span>{t("settings.cliPath")}</span>
-            <input
-              value={draft.cli_path ?? ""}
-              onChange={(event) => setDraft({ ...draft, cli_path: event.target.value })}
-            />
-          </label>
-          <label>
-            <span>{t("settings.cliModel")}</span>
-            <input
-              value={draft.cli_model ?? ""}
-              onChange={(event) => setDraft({ ...draft, cli_model: event.target.value })}
-            />
-          </label>
-          <label>
-            <span>{t("settings.cliProfile")}</span>
-            <input
-              value={draft.cli_profile ?? ""}
-              onChange={(event) => setDraft({ ...draft, cli_profile: event.target.value })}
-            />
-          </label>
-        </div>
+        {mode === "cli" ? (
+          <div className="settings-provider-section">
+            <div className="settings-grid single-row">
+              <label>
+                <span>{t("settings.cliPath")}</span>
+                <input
+                  required
+                  value={draft.cli_path ?? ""}
+                  onChange={(event) => setDraft({ ...draft, cli_path: event.target.value })}
+                />
+              </label>
+            </div>
 
-        <section className="inline-help">
-          <strong>{t("settings.cliLoginCommand")}</strong>
-          <code>{settings.data?.cli_login_command ?? "codex login --device-auth"}</code>
-          <p>{t("settings.cliHelp")}</p>
-        </section>
+            <section className="inline-help">
+              <strong>{t("settings.cliLoginCommand")}</strong>
+              <code>{settings.data?.cli_login_command ?? "codex login --device-auth"}</code>
+              <p>{t("settings.cliHelp")}</p>
+            </section>
 
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={Boolean(draft.persist_to_env)}
-            onChange={(event) => setDraft({ ...draft, persist_to_env: event.target.checked })}
-          />
-          <span>{t("settings.persist")}</span>
-        </label>
+            <details className="settings-advanced">
+              <summary>{t("settings.cliAdvanced")}</summary>
+              <div className="settings-grid">
+                <label>
+                  <span>{t("settings.cliModel")}</span>
+                  <input
+                    value={draft.cli_model ?? ""}
+                    onChange={(event) => setDraft({ ...draft, cli_model: event.target.value })}
+                  />
+                </label>
+                <label>
+                  <span>{t("settings.cliProfile")}</span>
+                  <input
+                    value={draft.cli_profile ?? ""}
+                    onChange={(event) => setDraft({ ...draft, cli_profile: event.target.value })}
+                  />
+                </label>
+              </div>
+            </details>
+          </div>
+        ) : null}
+
+        <em className="field-help">{t("settings.localSaveNote")}</em>
 
         <div className="settings-actions">
           <button className="primary-button" type="submit">
@@ -162,9 +166,19 @@ export function SettingsPage() {
         </div>
       </form>
 
-      <EmptyState title={t("settings.providerMock")}>
-        {draft.provider === "mock" ? t("settings.mockNote") : t("settings.envNote")}
-      </EmptyState>
+      <EmptyState title={t(helpCopy.title)}>{t(helpCopy.body)}</EmptyState>
     </div>
   );
+}
+
+function providerHelpCopy(mode: AiProviderMode): { title: TranslationKey; body: TranslationKey } {
+  if (mode === "openai") {
+    return { title: "settings.providerOpenai", body: "settings.openaiNote" };
+  }
+
+  if (mode === "cli") {
+    return { title: "settings.providerCli", body: "settings.cliNote" };
+  }
+
+  return { title: "settings.providerMock", body: "settings.mockNote" };
 }

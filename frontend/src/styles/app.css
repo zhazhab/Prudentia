@@ -544,6 +544,32 @@ textarea:focus {
   gap: 12px;
 }
 
+.settings-grid.single-row {
+  grid-template-columns: minmax(220px, 1fr);
+}
+
+.settings-provider-section {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-advanced {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-advanced summary {
+  width: fit-content;
+  color: #2f514f;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.settings-advanced[open] summary {
+  margin-bottom: 10px;
+}
+
 .research-actions {
   display: grid;
   grid-template-columns: minmax(300px, 1.2fr) minmax(220px, 0.7fr) minmax(220px, 0.7fr);

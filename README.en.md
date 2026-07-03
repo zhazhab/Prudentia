@@ -118,7 +118,7 @@ AI_CLI_MODEL=
 AI_CLI_PROFILE=
 ```
 
-You can also edit AI settings from the app Settings page. Runtime changes take effect immediately; enabling "write .env" persists them for backend restarts.
+You can also edit AI settings from the app Settings page. Saving applies changes immediately and writes them to the local `.env` so they persist across backend restarts.
 
 ## Import Template
 
