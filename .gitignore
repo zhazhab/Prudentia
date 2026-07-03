@@ -36,4 +36,5 @@ npm-debug.log*
 data/
 
 # Local planning and process docs
+.scratch/
 docs/superpowers/
