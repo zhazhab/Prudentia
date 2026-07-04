@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-Prudentia is a local-first investment workspace for personal investment systems, thesis-driven memos, portfolio visibility, and RPG-like investor profiling.
+Prudentia is a local-first investment workspace. The current frontend focuses on thesis-driven memos, portfolio holdings/import visibility, and local AI provider configuration.
 
 ## Repository Name
 
@@ -19,11 +19,10 @@ In the ideal state, users can build their own investment system in Prudentia and
 ## Current Capabilities
 
 - Rust backend with `axum`, `sqlx`, SQLite, provider-based AI, and provider-based market data.
-- React + Vite + TypeScript frontend with Dashboard, Portfolio, Decision Deltas, Memos, Investment System, and Profile views.
-- Portfolio CSV/Excel/screenshot unified draft import, field mapping, confirmed merge commit, position edit/delete, value/weight/P/L calculations, CNY base summary, and scheduled quote + FX refresh.
-- Decision Deltas turn quantified decisions into actual legs plus baseline shadow legs, refresh market-data snapshots, and show portfolio return differences, one-fork comparisons, and review candidate adoption.
-- Research Library for article/person investment-thought distillation, stock snapshot analysis, portfolio reviews, and adopting candidate principles/checklist items into the investment system.
-- Rule-driven profile XP, levels, badges, attributes, and bias signals.
+- React + Vite + TypeScript frontend with Portfolio, Memos, and Settings views.
+- Portfolio CSV/Excel/screenshot unified draft import, field mapping, local code-directory matching, confirmed merge commit, position edit/delete, value/weight/P/L calculations, CNY base summary, snapshot performance views, index-proxy comparison, and daily-TTL quote/FX refresh.
+- Memo workflow for creating notes and using AI extraction for thesis, risks, catalysts, disconfirming evidence, and checklist items.
+- AI Settings page for Mock, OpenAI-compatible, and CLI providers, saved to the local `.env`.
 - English and Simplified Chinese UI, with `Accept-Language` passed to backend-generated system text.
 
 ## Planned Capabilities
@@ -32,6 +31,7 @@ In the ideal state, users can build their own investment system in Prudentia and
 - Stronger portfolio import flows: saved mappings, duplicate import handling, and account/market/sector analysis.
 - More market data, AI, and CLI providers behind clean replacement interfaces.
 - Decision review reminders that turn review dates, decision-delta snapshots, and thesis horizons into an actionable workflow.
+- Reconnect the Research Library, Investment System, and Profile to the frontend.
 - Expanded investor profile rules so XP, attributes, badges, and bias signals better reflect the user's investment process.
 - Reserved broker and transaction sync interfaces while keeping local-first storage and replaceable provider boundaries.
 - Exportable investment systems, memos, and review reports for long-term archiving and sharing.
@@ -63,6 +63,8 @@ Useful commands:
 
 ```sh
 cargo fmt
+make check-backend-size
+make check-backend-clippy
 cargo test -p prudentia-backend
 ```
 
@@ -91,6 +93,27 @@ To use Alpha Vantage-compatible quote refreshes:
 ```env
 MARKET_DATA_PROVIDER=alpha_vantage
 ALPHA_VANTAGE_API_KEY=your_key
+PRICE_REFRESH_TTL_SECS=86400
+```
+
+Quotes, FX, and benchmark ETF proxies refresh automatically with a 24-hour TTL by default. The frontend does not expose a manual refresh button and only reads local API data; refresh failures keep stale state and log warnings without blocking startup.
+
+The local security code directory uses the no-account public provider by default for screenshot or draft name-to-`symbol` matching:
+
+```env
+SYMBOL_DIRECTORY_PROVIDER=public
+SYMBOL_DIRECTORY_PUBLIC_CONFIG=config/symbol-directory-public.json
+SYMBOL_DIRECTORY_REFRESH_INTERVAL_SECS=86400
+```
+
+The public provider reads the normalized in-repo inventory file `data/symbol-directory/public/symbols.json` by default and imports it into the local SQLite code directory at startup. That file is generated from the public directories declared in `config/symbol-directory-public.json`, including SSE stock/fund suggestion data, HKEX English and Traditional Chinese securities lists, and Nasdaq Trader US symbol lists. It does not require an account or token. Each security record in the inventory only keeps `symbol`, `name`, `market`, and `currency`; SQLite `security_symbols` stores the same four fields plus the file-level `updated_at`. Before writing the inventory, Traditional Chinese security names are converted to Simplified Chinese. On backend startup, Prudentia checks the inventory `updated_at`; it reuses the file for 24 hours by default, and only refreshes public sources asynchronously after expiry before replacing that inventory file. Refresh failures only emit warnings and do not block startup or existing local matching. Imports only query the local SQLite directory and do not make live external search requests. Chinese-name matching folds Traditional and Simplified variants; when matching still fails, fill `symbol` manually in the draft or switch to a future authorized provider.
+
+Optionally, use Tushare to refresh the local security code directory:
+
+```env
+SYMBOL_DIRECTORY_PROVIDER=tushare
+TUSHARE_TOKEN=your_token
+SYMBOL_DIRECTORY_REFRESH_INTERVAL_SECS=86400
 ```
 
 To use an OpenAI-compatible chat completions endpoint:

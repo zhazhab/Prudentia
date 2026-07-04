@@ -19,6 +19,7 @@ Prudentia treats code readability, maintainability, and explainability as first-
 - Use generics when a reusable algorithm works over multiple implementations, such as `CliAiProvider<B: CliBackend>`. Do not introduce generics only to look abstract.
 - Keep blocking work out of Tokio async workers. CLI calls, heavy file parsing, and CPU-heavy transformations should be isolated behind the relevant boundary.
 - Avoid large orchestration functions. Prefer domain modules that own their own validation, normalization, persistence calls, and provider interaction.
+- No backend Rust source file may exceed 800 lines. Split oversized files by domain logic, such as types, routes, import parsing, persistence, provider adapters, and tests. `make check-backend-size` enforces this limit.
 
 ## No Spaghetti Code
 

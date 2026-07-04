@@ -1,77 +1,168 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
-  ClipboardPaste,
   Edit3,
   FileUp,
-  ImageUp,
-  RefreshCw,
+  Plus,
   Save,
+  SearchCheck,
+  SlidersHorizontal,
   Trash2,
   X
 } from "lucide-react";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis
+} from "recharts";
+import type { AiWsServerMessage } from "../api/aiWs";
 import { api, type FilePayload, type ImagePayload } from "../api/client";
+import { useAiWebSocket } from "../api/useAiWebSocket";
 import { EmptyState } from "../components/EmptyState";
 import { StatCard } from "../components/StatCard";
 import { useI18n, type TranslationKey } from "../i18n";
 import type {
   PortfolioDraftRow,
+  PortfolioImageImportPreview,
+  PortfolioImageImportTask,
   PortfolioImportMapping,
   PortfolioImportPreview,
+  PortfolioPerformancePeriod,
+  PortfolioPerformanceResponse,
   PortfolioPosition
 } from "../types/domain";
 import {
   canCommitDraftRows,
-  draftRowHasWarnings,
+  currencyOptionsForValue,
+  draftEditableDisplayFields,
+  draftRowsForCommit,
+  emptyPortfolioDraftRow,
+  ensureDraftRowClientIds,
   formatBaseMoney,
   formatMoney,
-  marketGroupsForDisplay,
+  marketOptionsForValue,
+  mergeDuplicateDraftRowsBySymbol,
+  performanceChartRows,
+  performanceChartYAxisDomain,
   percent,
+  positionTableDisplayFields,
+  portfolioDashboardPanelIds,
+  portfolioImportFileKind,
+  portfolioIssueLabels,
   positionEditDraft,
   positionUpdatePayload,
   updateDraftRowField,
+  type BenchmarkComparisonMetric,
   type PortfolioDraftEditableField,
+  type PositionTableDisplayField,
   type PositionEditDraft
 } from "./portfolioRules";
 
+type DraftTableRow = PortfolioDraftRow & {
+  client_row_id: string;
+  source_id?: string;
+  source_label?: string;
+};
+
+type ImageImportTaskState = PortfolioImageImportTask & {
+  payload: ImagePayload;
+  source_label: string;
+  started_at: number | null;
+};
+
+type FileImportMode = "append" | "replace";
+type PerformanceView = "amount" | "percent";
+
 export function PortfolioPage() {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const queryClient = useQueryClient();
   const positions = useQuery({ queryKey: ["positions"], queryFn: api.positions });
   const summary = useQuery({ queryKey: ["portfolio-summary"], queryFn: api.portfolioSummary });
+  const [performancePeriod, setPerformancePeriod] = useState<PortfolioPerformancePeriod>("month");
+  const [performanceView, setPerformanceView] = useState<PerformanceView>("percent");
+  const [benchmarkMetric, setBenchmarkMetric] = useState<BenchmarkComparisonMetric>("cumulative");
+  const performance = useQuery({
+    queryKey: ["portfolio-performance", performancePeriod],
+    queryFn: () => api.portfolioPerformance(performancePeriod)
+  });
   const [importOpen, setImportOpen] = useState(false);
   const [filePayload, setFilePayload] = useState<FilePayload | null>(null);
   const [preview, setPreview] = useState<PortfolioImportPreview | null>(null);
   const [mapping, setMapping] = useState<PortfolioImportMapping | null>(null);
-  const [draftRows, setDraftRows] = useState<PortfolioDraftRow[]>([]);
+  const [draftRows, setDraftRows] = useState<DraftTableRow[]>([]);
   const [draftWarnings, setDraftWarnings] = useState<string[]>([]);
   const [draftSource, setDraftSource] = useState<string | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ symbol: string; draft: PositionEditDraft } | null>(null);
+  const [imageTasks, setImageTasks] = useState<ImageImportTaskState[]>([]);
+  const { session: aiWs } = useAiWebSocket();
+  const imageTasksRef = useRef<ImageImportTaskState[]>([]);
+  const fileImportModeRef = useRef<FileImportMode>("replace");
+  const fileImportSourceIdRef = useRef<string | null>(null);
+  const draftRowIdRef = useRef(0);
 
-  const marketGroups = useMemo(
-    () => (summary.data ? marketGroupsForDisplay(summary.data) : []),
-    [summary.data]
+  const performanceChartData = useMemo(
+    () => performanceChartRows(performance.data, benchmarkMetric),
+    [performance.data, benchmarkMetric]
   );
-  const chartData = useMemo(
-    () =>
-      marketGroups.map((group) => ({
-        label: group.label,
-        weight: Number.parseFloat(group.weightLabel)
-      })),
-    [marketGroups]
+  const performanceChartDomain = useMemo(
+    () => performanceChartYAxisDomain(performanceChartData),
+    [performanceChartData]
+  );
+  const showPerformanceDots = performanceChartData.length < 2;
+  const performanceMetric = performance.data?.portfolio;
+  const performanceAmount = performanceMetric?.profit_loss_base ?? null;
+  const performanceReturn = performanceMetric?.return_pct ?? null;
+  const performanceAnnualized = performanceMetric?.annualized_return_pct ?? null;
+  const performanceValue =
+    performanceView === "amount"
+      ? performanceAmount === null
+        ? "—"
+        : formatMoney(performanceAmount, performance.data?.base_currency ?? "CNY")
+      : formatOptionalPercent(performanceReturn);
+  const performanceDetail =
+    performanceView === "amount"
+      ? t("portfolio.performancePercentDetail", { value: formatOptionalPercent(performanceReturn) })
+      : t("portfolio.performanceAmountDetail", {
+          value:
+            performanceAmount === null
+              ? "—"
+              : formatMoney(performanceAmount, performance.data?.base_currency ?? "CNY")
+        });
+  const checkedDraftRows = useMemo(
+    () => mergeDuplicateDraftRowsBySymbol(draftRows) as DraftTableRow[],
+    [draftRows]
   );
   const draftHasRows = draftRows.length > 0;
-  const draftCanCommit = canCommitDraftRows(draftRows);
+  const draftCanCommit = canCommitDraftRows(checkedDraftRows);
+
+  useEffect(() => {
+    return aiWs.onMessage(handleAiWsMessage);
+  }, [aiWs]);
+
+  useEffect(() => {
+    return () => {
+      cancelRunningImageTasks();
+    };
+  }, [aiWs]);
 
   const previewPortfolioImport = useMutation({
     mutationFn: api.previewPortfolioImport,
     onSuccess: (result) => {
       setPreview(result);
       setMapping(result.suggested_mapping);
-      setDraftRows(result.draft_rows);
+      mergeDraftRows(
+        result.draft_rows,
+        fileImportSourceIdRef.current ?? makeRequestId(),
+        "file",
+        fileImportModeRef.current
+      );
       setDraftWarnings(result.validation_errors);
       setDraftSource("file");
       setDraftError(null);
@@ -82,24 +173,15 @@ export function PortfolioPage() {
   const draftPortfolioImport = useMutation({
     mutationFn: api.draftPortfolioImport,
     onSuccess: (result) => {
-      setDraftRows(result.draft_rows);
+      mergeDraftRows(
+        result.draft_rows,
+        fileImportSourceIdRef.current ?? makeRequestId(),
+        result.source,
+        fileImportModeRef.current
+      );
       setDraftWarnings(result.warnings);
       setDraftSource(result.source);
       setDraftError(null);
-    }
-  });
-
-  const previewImageImport = useMutation({
-    mutationFn: api.previewPortfolioImageImport,
-    onSuccess: (result) => {
-      setPreview(null);
-      setMapping(null);
-      setFilePayload(null);
-      setDraftRows(result.draft_rows);
-      setDraftWarnings(result.warnings);
-      setDraftSource(result.source);
-      setDraftError(null);
-      setImportOpen(true);
     }
   });
 
@@ -111,11 +193,22 @@ export function PortfolioPage() {
     }
   });
 
-  const refreshPrices = useMutation({
-    mutationFn: api.refreshPrices,
-    onSuccess: () => {
-      invalidatePortfolio(queryClient);
-      queryClient.invalidateQueries({ queryKey: ["profile"] });
+  const resolveDraftSymbols = useMutation({
+    mutationFn: api.resolvePortfolioDraftSymbols,
+    onSuccess: (result) => {
+      setDraftRows((current) =>
+        ensureDraftRowsHaveIds(
+          mergeDuplicateDraftRowsBySymbol(
+            result.draft_rows.map((row, index) => ({
+              ...row,
+              client_row_id: current[index]?.client_row_id,
+              source_id: current[index]?.source_id,
+              source_label: current[index]?.source_label
+            }))
+          )
+        )
+      );
+      setDraftError(t("portfolio.symbolResolveDone", { count: result.resolved_count }));
     }
   });
 
@@ -136,9 +229,8 @@ export function PortfolioPage() {
   const actionError =
     draftError ??
     previewPortfolioImport.error?.message ??
-    previewImageImport.error?.message ??
     commitDraft.error?.message ??
-    refreshPrices.error?.message ??
+    resolveDraftSymbols.error?.message ??
     updatePosition.error?.message ??
     deletePosition.error?.message ??
     null;
@@ -147,9 +239,47 @@ export function PortfolioPage() {
     if (!file) {
       return;
     }
+    setDraftError(null);
     const payload = await fileToPayload(file);
+    const mode =
+      draftRowsForCommit(draftRows).length > 0 && window.confirm(t("portfolio.appendFileConfirm"))
+        ? "append"
+        : "replace";
+    const sourceId = `file:${makeRequestId()}`;
+    fileImportModeRef.current = mode;
+    fileImportSourceIdRef.current = sourceId;
     setFilePayload(payload);
     previewPortfolioImport.mutate(payload);
+  }
+
+  async function handleImportFiles(files: FileList | File[] | null | undefined) {
+    const selectedFiles = Array.from(files ?? []);
+    if (!selectedFiles.length) {
+      return;
+    }
+
+    const tabularFiles = selectedFiles.filter((file) => portfolioImportFileKind(file) === "tabular");
+    const imageFiles = selectedFiles.filter((file) => portfolioImportFileKind(file) === "image");
+    const unsupportedFiles = selectedFiles.filter((file) => portfolioImportFileKind(file) === "unsupported");
+
+    if (unsupportedFiles.length) {
+      setDraftError(t("portfolio.unsupportedImportFile", { name: unsupportedFiles[0].name }));
+      return;
+    }
+    if (tabularFiles.length && imageFiles.length) {
+      setDraftError(t("portfolio.mixedImportFileTypes"));
+      return;
+    }
+    if (tabularFiles.length > 1) {
+      setDraftError(t("portfolio.oneTabularFileOnly"));
+      return;
+    }
+    if (tabularFiles.length === 1) {
+      await handleFile(tabularFiles[0]);
+      return;
+    }
+
+    await handleImageFiles(imageFiles);
   }
 
   function applyMapping() {
@@ -159,37 +289,35 @@ export function PortfolioPage() {
     draftPortfolioImport.mutate({ ...filePayload, mapping });
   }
 
-  async function handleImageFile(file: File | null) {
-    if (!file) {
+  async function handleImageFiles(files: FileList | File[] | null | undefined) {
+    if (!files?.length) {
       return;
     }
     setDraftError(null);
-    previewImageImport.mutate(await imageToPayload(file));
-  }
+    setPreview(null);
+    setMapping(null);
+    setFilePayload(null);
+    setImportOpen(true);
 
-  async function handleClipboardImage() {
-    const clipboard = navigator.clipboard as (Clipboard & { read?: () => Promise<ClipboardItem[]> }) | undefined;
-    if (!clipboard?.read) {
-      setDraftError(t("portfolio.clipboardUnsupported"));
-      return;
-    }
-
-    try {
-      const items = await clipboard.read();
-      for (const item of items) {
-        const imageType = item.types.find((type) => type.startsWith("image/"));
-        if (imageType) {
-          const blob = await item.getType(imageType);
-          await handleImageFile(new File([blob], `clipboard.${extensionForMime(imageType)}`, { type: imageType }));
-          return;
-        }
-      }
-    } catch (error) {
-      setDraftError(error instanceof Error ? error.message : t("portfolio.clipboardUnsupported"));
-      return;
-    }
-
-    setDraftError(t("portfolio.noClipboardImage"));
+    const tasks = await Promise.all(
+      Array.from(files).map(async (file) => {
+        const id = `image:${makeRequestId()}`;
+        return {
+          id,
+          file_name: file.name,
+          status: "queued" as const,
+          stage: null,
+          elapsed_ms: 0,
+          recognized_rows: 0,
+          error: null,
+          payload: await imageToPayload(file),
+          source_label: file.name,
+          started_at: null
+        };
+      })
+    );
+    updateImageTasks((current) => [...current, ...tasks]);
+    startQueuedImageImports();
   }
 
   function updateMapping(field: keyof PortfolioImportMapping, value: string) {
@@ -199,27 +327,188 @@ export function PortfolioPage() {
     }));
   }
 
+  function addManualDraftRow() {
+    mergeDraftRows([emptyPortfolioDraftRow()], `manual:${makeRequestId()}`, t("portfolio.manualEntry"), "append");
+  }
+
+  function openImportTools() {
+    setImportOpen(true);
+  }
+
+  function toggleImportTools() {
+    if (importOpen) {
+      setImportOpen(false);
+    } else {
+      openImportTools();
+    }
+  }
+
+  function mergeDraftRows(
+    rows: PortfolioDraftRow[],
+    sourceId: string,
+    sourceLabel: string,
+    mode: FileImportMode
+  ) {
+    const sourcedRows = rows.map((row) => ({
+      ...row,
+      client_row_id: makeDraftRowClientId(),
+      source_id: sourceId,
+      source_label: sourceLabel
+    }));
+    setDraftRows((current) => {
+      const base = mode === "replace" ? [] : current.filter((row) => row.source_id !== sourceId);
+      return mergeDuplicateDraftRowsBySymbol([...base, ...sourcedRows]) as DraftTableRow[];
+    });
+  }
+
+  function updateImageTasks(updater: (tasks: ImageImportTaskState[]) => ImageImportTaskState[]) {
+    const next = updater(imageTasksRef.current);
+    imageTasksRef.current = next;
+    setImageTasks(next);
+  }
+
+  function startQueuedImageImports() {
+    const tasks = imageTasksRef.current;
+    const openSlots = Math.max(0, 2 - tasks.filter((task) => task.status === "running").length);
+    const queued = tasks.filter((task) => task.status === "queued").slice(0, openSlots);
+    queued.forEach(startImageImportTask);
+  }
+
+  function startImageImportTask(task: ImageImportTaskState) {
+    const startedAt = Date.now();
+    updateImageTasks((current) =>
+      current.map((item) =>
+        item.id === task.id ? { ...item, status: "running", stage: "queued", started_at: startedAt } : item
+      )
+    );
+    aiWs
+      .send({
+        type: "portfolio_image_import.start",
+        request_id: task.id,
+        payload: task.payload
+      })
+      .catch((error) => {
+        updateImageTaskFailure(task.id, error instanceof Error ? error.message : String(error));
+        startQueuedImageImports();
+      });
+  }
+
+  function handleAiWsMessage(message: AiWsServerMessage) {
+    if (message.type === "accepted") {
+      updateImageTask(message.request_id, { stage: "accepted" });
+      return;
+    }
+
+    if (message.type === "progress") {
+      updateImageTask(message.request_id, { stage: message.stage });
+      return;
+    }
+
+    if (message.type === "failed") {
+      updateImageTaskFailure(message.request_id, message.error);
+      startQueuedImageImports();
+      return;
+    }
+
+    if (message.type === "canceled") {
+      updateImageTask(message.request_id, { status: "canceled", stage: "canceled" });
+      startQueuedImageImports();
+      return;
+    }
+
+    if (message.type === "completed" && message.artifact_type === "portfolio_image_import.preview") {
+      const task = imageTasksRef.current.find((item) => item.id === message.request_id);
+      const previewResult = message.data as PortfolioImageImportPreview;
+      mergeDraftRows(previewResult.draft_rows, message.request_id, task?.source_label ?? "screenshot", "append");
+      setDraftWarnings((current) => [...current, ...previewResult.warnings]);
+      setDraftSource(previewResult.source);
+      updateImageTask(message.request_id, {
+        status: "completed",
+        stage: "completed",
+        recognized_rows: previewResult.draft_rows.length
+      });
+      startQueuedImageImports();
+    }
+  }
+
+  function updateImageTask(id: string, patch: Partial<ImageImportTaskState>) {
+    updateImageTasks((current) =>
+      current.map((task) =>
+        task.id === id
+          ? {
+              ...task,
+              ...patch,
+              elapsed_ms: task.started_at ? Date.now() - task.started_at : task.elapsed_ms
+            }
+          : task
+      )
+    );
+  }
+
+  function updateImageTaskFailure(id: string, error: string) {
+    updateImageTask(id, { status: "failed", stage: "failed", error });
+  }
+
+  function cancelImageTask(id: string) {
+    const task = imageTasksRef.current.find((item) => item.id === id);
+    if (task?.status === "running") {
+      aiWs.send({ type: "cancel", request_id: id }).catch(() => undefined);
+    } else {
+      updateImageTask(id, { status: "canceled", stage: "canceled" });
+      startQueuedImageImports();
+    }
+  }
+
   function updateDraftRow(index: number, field: PortfolioDraftEditableField, value: string) {
     setDraftRows((current) =>
-      current.map((row, rowIndex) => (rowIndex === index ? updateDraftRowField(row, field, value) : row))
+      mergeDuplicateDraftRowsBySymbol(
+        current.map((row, rowIndex) => {
+          if (rowIndex !== index) {
+            return row;
+          }
+          return {
+            ...row,
+            ...updateDraftRowField(row, field, value),
+            client_row_id: row.client_row_id
+          };
+        })
+      ) as DraftTableRow[]
     );
   }
 
   function removeDraftRow(index: number) {
-    setDraftRows((current) => current.filter((_, rowIndex) => rowIndex !== index));
+    setDraftRows((current) => mergeDuplicateDraftRowsBySymbol(current.filter((_, rowIndex) => rowIndex !== index)) as DraftTableRow[]);
+  }
+
+  function cancelRunningImageTasks() {
+    imageTasksRef.current.forEach((task) => {
+      if (task.status === "running") {
+        aiWs.send({ type: "cancel", request_id: task.id }).catch(() => undefined);
+      }
+    });
   }
 
   function clearDraft() {
+    cancelRunningImageTasks();
     setDraftRows([]);
     setDraftWarnings([]);
     setDraftSource(null);
     setDraftError(null);
+    updateImageTasks(() => []);
     setPreview(null);
     setMapping(null);
     setFilePayload(null);
     previewPortfolioImport.reset();
     draftPortfolioImport.reset();
-    previewImageImport.reset();
+  }
+
+  function ensureDraftRowsHaveIds(rows: Array<PortfolioDraftRow & Partial<DraftTableRow>>): DraftTableRow[] {
+    return ensureDraftRowClientIds(rows, makeDraftRowClientId) as DraftTableRow[];
+  }
+
+  function makeDraftRowClientId() {
+    draftRowIdRef.current += 1;
+    return `draft-row:${draftRowIdRef.current}`;
   }
 
   function startEditing(position: PortfolioPosition) {
@@ -240,34 +529,70 @@ export function PortfolioPage() {
           <h2>{t("portfolio.title")}</h2>
         </div>
         <div className="import-actions">
-          <button className="ghost-button" type="button" onClick={() => setImportOpen((open) => !open)}>
+          <button className="ghost-button" type="button" onClick={toggleImportTools}>
             <FileUp size={18} />
             {t("portfolio.importTools")}
-          </button>
-          <button className="primary-button" type="button" onClick={() => refreshPrices.mutate()}>
-            <RefreshCw size={18} />
-            {t("portfolio.refreshPrices")}
           </button>
         </div>
       </header>
 
+      <section className="panel performance-panel">
+        <div className="performance-toolbar">
+          <div>
+            <h3>{t("portfolio.performance")}</h3>
+            {performance.data?.partial_period && performance.data.start_date ? (
+              <p>{t("portfolio.partialPeriod", { date: shortDate(performance.data.start_date) })}</p>
+            ) : (
+              <p>{t("portfolio.performanceSnapshotBasis")}</p>
+            )}
+          </div>
+          <div className="performance-controls">
+            <div className="segmented-control" aria-label={t("portfolio.performancePeriod")}>
+              {performancePeriodOptions.map((option) => (
+                <button
+                  key={option.value}
+                  className={performancePeriod === option.value ? "active" : ""}
+                  type="button"
+                  onClick={() => setPerformancePeriod(option.value)}
+                >
+                  {t(option.labelKey)}
+                </button>
+              ))}
+            </div>
+            <div className="segmented-control" aria-label={t("portfolio.performanceView")}>
+              {performanceViewOptions.map((option) => (
+                <button
+                  key={option.value}
+                  className={performanceView === option.value ? "active" : ""}
+                  type="button"
+                  onClick={() => setPerformanceView(option.value)}
+                >
+                  {t(option.labelKey)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="stats-grid">
+        <StatCard
+          label={t("portfolio.periodReturn")}
+          value={performance.isLoading ? t("portfolio.loadingPerformance") : performanceValue}
+          detail={performanceDetail}
+          tone={performanceAmount === null ? "neutral" : performanceAmount >= 0 ? "positive" : "warning"}
+        />
+        <StatCard
+          label={t("portfolio.annualizedReturn")}
+          value={formatOptionalPercent(performanceAnnualized)}
+          detail={t("portfolio.annualizedReturnDetail")}
+          tone={performanceAnnualized === null ? "neutral" : performanceAnnualized >= 0 ? "positive" : "warning"}
+        />
         <StatCard label={t("portfolio.cnyTotal")} value={summary.data ? formatBaseMoney(summary.data) : "CN¥0.00"} />
         <StatCard
           label={t("portfolio.cnyPl")}
           value={formatMoney(summary.data?.total_unrealized_pnl_base ?? 0, "CNY")}
           tone={(summary.data?.total_unrealized_pnl_base ?? 0) >= 0 ? "positive" : "warning"}
-        />
-        <StatCard
-          label={t("portfolio.marketValue")}
-          value={`${marketGroups.length}`}
-          detail={t("portfolio.marketGroups")}
-        />
-        <StatCard
-          label={t("portfolio.stalePrices")}
-          value={`${summary.data?.price_stale_count ?? 0}`}
-          detail={t("portfolio.fxStaleCount", { count: summary.data?.fx_stale_count ?? 0 })}
-          tone={(summary.data?.price_stale_count ?? 0) + (summary.data?.fx_stale_count ?? 0) > 0 ? "warning" : "neutral"}
         />
       </section>
 
@@ -289,34 +614,39 @@ export function PortfolioPage() {
           <div className="import-source-row">
             <label className="file-button">
               <FileUp size={18} />
-              {t("portfolio.chooseFile")}
+              {t("portfolio.addFile")}
               <input
                 type="file"
-                accept=".csv,.tsv,.xlsx"
-                onChange={(event) => handleFile(event.target.files?.[0] ?? null)}
+                accept={portfolioImportFileAccept}
+                multiple
+                onChange={(event) => {
+                  void handleImportFiles(event.target.files);
+                  event.currentTarget.value = "";
+                }}
               />
             </label>
-            <label className="file-button">
-              <ImageUp size={18} />
-              {t("portfolio.chooseImage")}
-              <input
-                type="file"
-                accept="image/png,image/jpeg,image/jpg,image/webp"
-                onChange={(event) => handleImageFile(event.target.files?.[0] ?? null)}
-              />
-            </label>
-            <button className="ghost-button" type="button" onClick={handleClipboardImage}>
-              <ClipboardPaste size={18} />
-              {t("portfolio.pasteImage")}
-            </button>
+            {draftHasRows ? (
+              <button
+                className="ghost-button"
+                type="button"
+                disabled={resolveDraftSymbols.isPending}
+                onClick={() => resolveDraftSymbols.mutate({ rows: checkedDraftRows })}
+              >
+                <SearchCheck size={18} />
+                {t("portfolio.resolveDraftSymbols")}
+              </button>
+            ) : null}
             {draftSource ? <span className="pill">{draftSource}</span> : null}
           </div>
 
-          {previewImageImport.isPending || previewPortfolioImport.isPending || draftPortfolioImport.isPending ? (
+          {previewPortfolioImport.isPending || draftPortfolioImport.isPending || resolveDraftSymbols.isPending ? (
             <div className="warning-box">{t("portfolio.preparingDraft")}</div>
           ) : null}
+          <ImageImportTasks tasks={imageTasks} onCancel={cancelImageTask} />
           {actionError ? <div className="warning-box">{actionError}</div> : null}
-          {draftWarnings.length ? <div className="warning-box">{draftWarnings.join(" ")}</div> : null}
+          {draftWarnings.length ? (
+            <div className="warning-box">{portfolioIssueLabels(draftWarnings, locale).join(" ")}</div>
+          ) : null}
 
           {preview ? (
             <div className="import-grid">
@@ -339,20 +669,20 @@ export function PortfolioPage() {
                 ))}
               </div>
               <button className="ghost-button fit-button" type="button" onClick={applyMapping}>
-                <RefreshCw size={18} />
+                <SlidersHorizontal size={18} />
                 {t("portfolio.applyMapping")}
               </button>
             </div>
           ) : null}
 
-          <DraftTable rows={draftRows} onChange={updateDraftRow} onRemove={removeDraftRow} />
+          <DraftTable rows={checkedDraftRows} onAdd={addManualDraftRow} onChange={updateDraftRow} onRemove={removeDraftRow} />
 
           <div className="settings-actions">
             <button
               className="primary-button"
               type="button"
               disabled={!draftCanCommit || commitDraft.isPending}
-              onClick={() => commitDraft.mutate({ rows: draftRows })}
+              onClick={() => commitDraft.mutate({ rows: draftRowsForCommit(checkedDraftRows) })}
             >
               <Check size={18} />
               {t("portfolio.commitDraft")}
@@ -364,7 +694,77 @@ export function PortfolioPage() {
         </section>
       ) : null}
 
-      <section className="dashboard-grid">
+      <section className="panel performance-chart-panel">
+        <div className="panel-head">
+          <div>
+            <h3>{t("portfolio.benchmarkComparison")}</h3>
+            <p>{t("portfolio.benchmarkProxyNote")}</p>
+          </div>
+          <div className="segmented-control" aria-label={t("portfolio.benchmarkMetric")}>
+            {benchmarkMetricOptions.map((option) => (
+              <button
+                key={option.value}
+                className={benchmarkMetric === option.value ? "active" : ""}
+                type="button"
+                onClick={() => setBenchmarkMetric(option.value)}
+              >
+                {t(option.labelKey)}
+              </button>
+            ))}
+          </div>
+        </div>
+        {performanceChartData.length ? (
+          <div className="performance-chart-stack">
+            <ResponsiveContainer width="100%" height={260}>
+              <LineChart data={performanceChartData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="label" />
+                <YAxis domain={performanceChartDomain} tickFormatter={(value) => formatChartTick(Number(value), benchmarkMetric)} />
+                <Tooltip formatter={(value: number) => formatChartValue(value, benchmarkMetric)} />
+                <Legend />
+                {benchmarkMetric !== "excess" ? (
+                  <Line
+                    type="monotone"
+                    dataKey="portfolio"
+                    name={t("portfolio.performancePortfolio")}
+                    stroke="#2f6f73"
+                    strokeWidth={2.5}
+                    dot={showPerformanceDots ? { r: 4 } : false}
+                    activeDot={{ r: 5 }}
+                    connectNulls
+                  />
+                ) : null}
+                {benchmarkVisuals.map((benchmark) => (
+                  <Line
+                    key={benchmark.key}
+                    type="monotone"
+                    dataKey={benchmark.key}
+                    name={benchmarkLineLabel(benchmarkMetric, benchmark.labelKey, t)}
+                    stroke={benchmark.color}
+                    strokeWidth={2}
+                    dot={showPerformanceDots ? { r: 4 } : false}
+                    activeDot={{ r: 5 }}
+                    connectNulls
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+            {showPerformanceDots ? <p className="chart-note">{t("portfolio.singleSnapshotChartNote")}</p> : null}
+            <div className="benchmark-status-list">
+              {(performance.data?.benchmarks ?? []).map((benchmark) => (
+                <span className={benchmark.available && !benchmark.stale ? "pill" : "pill warning"} key={benchmark.key}>
+                  {benchmarkLabel(benchmark.key, benchmark.label, t)} · {benchmark.symbol} ·{" "}
+                  {benchmarkStatusValue(benchmark, performance.data, benchmarkMetric, t)}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <EmptyState title={t("portfolio.noPerformanceTitle")}>{t("portfolio.noPerformanceBody")}</EmptyState>
+        )}
+      </section>
+
+      {portfolioDashboardPanelIds.includes("positions") ? (
         <section className="panel">
           <div className="panel-head">
             <h3>{t("portfolio.positions")}</h3>
@@ -374,38 +774,20 @@ export function PortfolioPage() {
               <table>
                 <thead>
                   <tr>
-                    <th>{t("portfolio.tableSymbol")}</th>
-                    <th>{t("portfolio.tableName")}</th>
-                    <th>{t("portfolio.mapMarket")}</th>
-                    <th>{t("portfolio.tableQty")}</th>
-                    <th>{t("portfolio.tableAvgCost")}</th>
-                    <th>{t("portfolio.tableMarketValue")}</th>
-                    <th>{t("portfolio.tablePl")}</th>
-                    <th>{t("portfolio.tableWeight")}</th>
-                    <th>{t("portfolio.tableStatus")}</th>
+                    {positionTableDisplayFields.map((field) => (
+                      <th key={field}>{t(positionTableFieldLabels[field])}</th>
+                    ))}
                     <th>{t("portfolio.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(positions.data ?? []).map((position) => (
                     <tr key={position.symbol}>
-                      <td>
-                        <strong>{position.symbol}</strong>
-                      </td>
-                      <td>{position.name}</td>
-                      <td>{position.market ?? "Other"}</td>
-                      <td>{number(position.quantity)}</td>
-                      <td>{formatMoney(position.average_cost, position.currency)}</td>
-                      <td>{formatMoney(position.market_value, position.currency)}</td>
-                      <td className={position.unrealized_pnl >= 0 ? "positive-text" : "warning-text"}>
-                        {formatMoney(position.unrealized_pnl, position.currency)}
-                      </td>
-                      <td>{percent(position.weight)}</td>
-                      <td>
-                        <span className={position.price_stale ? "pill warning" : "pill"}>
-                          {position.price_stale ? t("common.stale") : t("common.fresh")}
-                        </span>
-                      </td>
+                      {positionTableDisplayFields.map((field) => (
+                        <td key={field} className={positionTableCellClass(position, field)}>
+                          {positionTableCell(position, field)}
+                        </td>
+                      ))}
                       <td>
                         <div className="row-actions">
                           <button className="icon-button" type="button" onClick={() => startEditing(position)}>
@@ -429,38 +811,7 @@ export function PortfolioPage() {
             <EmptyState title={t("portfolio.noPositionsTitle")}>{t("portfolio.noPositionsBody")}</EmptyState>
           )}
         </section>
-
-        <section className="panel">
-          <div className="panel-head">
-            <h3>{t("portfolio.marketAllocation")}</h3>
-          </div>
-          {marketGroups.length ? (
-            <div className="market-stack">
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="label" />
-                  <YAxis tickFormatter={(value) => `${value}%`} />
-                  <Tooltip formatter={(value: number) => `${value.toFixed(1)}%`} />
-                  <Bar dataKey="weight" fill="#2f6f73" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-              <div className="legend-list">
-                {marketGroups.map((group) => (
-                  <div className="legend-row" key={group.label}>
-                    <strong>{group.label}</strong>
-                    <em>{group.nativeValue}</em>
-                    <em>{group.weightLabel}</em>
-                    {group.stale ? <span className="pill warning">{t("portfolio.fxStale")}</span> : null}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <EmptyState title={t("portfolio.noExposureTitle")}>{t("portfolio.noExposureBody")}</EmptyState>
-          )}
-        </section>
-      </section>
+      ) : null}
 
       {editing ? (
         <section className="panel edit-position-panel">
@@ -475,10 +826,24 @@ export function PortfolioPage() {
             {editFields.map((field) => (
               <label key={field.key}>
                 <span>{t(field.labelKey)}</span>
-                <input
-                  value={editing.draft[field.key]}
-                  onChange={(event) => updateEditDraft(field.key, event.target.value)}
-                />
+                {field.key === "currency" || field.key === "market" ? (
+                  <select
+                    value={editing.draft[field.key]}
+                    onChange={(event) => updateEditDraft(field.key, event.target.value)}
+                  >
+                    <option value=""></option>
+                    {optionsForPortfolioField(field.key, editing.draft[field.key]).map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={editing.draft[field.key]}
+                    onChange={(event) => updateEditDraft(field.key, event.target.value)}
+                  />
+                )}
               </label>
             ))}
           </div>
@@ -503,59 +868,193 @@ export function PortfolioPage() {
 
 function DraftTable({
   rows,
+  onAdd,
   onChange,
   onRemove
 }: {
-  rows: PortfolioDraftRow[];
+  rows: DraftTableRow[];
+  onAdd: () => void;
   onChange: (index: number, field: PortfolioDraftEditableField, value: string) => void;
   onRemove: (index: number) => void;
 }) {
   const { t } = useI18n();
+  const addRowButton = (
+    <button className="icon-button" type="button" aria-label={t("portfolio.addManualRow")} title={t("portfolio.addManualRow")} onClick={onAdd}>
+      <Plus size={16} />
+    </button>
+  );
 
   if (!rows.length) {
-    return <EmptyState title={t("portfolio.emptyDraftTitle")}>{t("portfolio.emptyDraftBody")}</EmptyState>;
+    return (
+      <EmptyState title={t("portfolio.emptyDraftTitle")} action={addRowButton}>
+        {t("portfolio.emptyDraftBody")}
+      </EmptyState>
+    );
   }
 
   return (
-    <div className="preview-table-wrap">
-      <table className="draft-table">
-        <thead>
-          <tr>
-            {draftFields.map((field) => (
-              <th key={field.key}>{t(field.labelKey)}</th>
-            ))}
-            <th>{t("portfolio.confidence")}</th>
-            <th>{t("portfolio.rowIssues")}</th>
-            <th>{t("portfolio.actions")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={`${row.symbol}-${index}`}>
+    <div className="draft-table-shell">
+      <div className="draft-table-toolbar">{addRowButton}</div>
+      <div className="preview-table-wrap">
+        <table className="draft-table">
+          <thead>
+            <tr>
               {draftFields.map((field) => (
-                <td key={field.key}>
-                  <input
-                    className="draft-input"
-                    value={(row[field.key] as string | null | undefined) ?? ""}
-                    onChange={(event) => onChange(index, field.key, event.target.value)}
-                  />
-                </td>
+                <th key={field.key}>{t(field.labelKey)}</th>
               ))}
-              <td>
-                <span className={draftRowHasWarnings(row) ? "pill warning" : "pill"}>{row.confidence}</span>
-              </td>
-              <td>{[...row.errors, ...row.warnings].join(" ") || "-"}</td>
-              <td>
-                <button className="icon-button danger" type="button" onClick={() => onRemove(index)}>
-                  <Trash2 size={16} />
-                </button>
-              </td>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={row.client_row_id}>
+                {draftFields.map((field) => (
+                  <td key={field.key}>
+                    {field.key === "currency" || field.key === "market" ? (
+                      <select
+                        aria-invalid={draftFieldHasError(row, field.key)}
+                        className={`draft-input${draftFieldHasError(row, field.key) ? " error" : ""}`}
+                        value={(row[field.key] as string | null | undefined) ?? ""}
+                        onChange={(event) => onChange(index, field.key, event.target.value)}
+                      >
+                        <option value=""></option>
+                        {optionsForPortfolioField(
+                          field.key,
+                          row[field.key] as string | null | undefined
+                        ).map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className={field.key === "symbol" ? "draft-symbol-cell" : undefined}>
+                        <input
+                          aria-invalid={draftFieldHasError(row, field.key)}
+                          className={`draft-input${draftFieldHasError(row, field.key) ? " error" : ""}`}
+                          value={(row[field.key] as string | null | undefined) ?? ""}
+                          onChange={(event) => onChange(index, field.key, event.target.value)}
+                        />
+                        {field.key === "symbol" ? (
+                          <button className="icon-button danger" type="button" onClick={() => onRemove(index)}>
+                            <Trash2 size={16} />
+                          </button>
+                        ) : null}
+                      </div>
+                    )}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
+}
+
+function draftFieldHasError(row: PortfolioDraftRow, field: (typeof draftEditableDisplayFields)[number]) {
+  return row.errors.some((error) => {
+    const normalized = error.toLocaleLowerCase();
+    if (field === "symbol") {
+      return normalized.includes("symbol");
+    }
+    if (field === "name") {
+      return normalized.includes("name");
+    }
+    if (field === "quantity") {
+      return normalized.includes("quantity");
+    }
+    if (field === "average_cost") {
+      return normalized.includes("average_cost");
+    }
+    if (field === "currency") {
+      return normalized.includes("currency");
+    }
+    if (field === "market") {
+      return normalized === "market is required";
+    }
+    return false;
+  });
+}
+
+function optionsForPortfolioField(
+  field: PortfolioDraftEditableField | keyof PositionEditDraft,
+  value: string | null | undefined
+) {
+  if (field === "currency") {
+    return currencyOptionsForValue(value);
+  }
+  if (field === "market") {
+    return marketOptionsForValue(value);
+  }
+  return [];
+}
+
+function ImageImportTasks({
+  tasks,
+  onCancel
+}: {
+  tasks: ImageImportTaskState[];
+  onCancel: (id: string) => void;
+}) {
+  const { t } = useI18n();
+
+  if (!tasks.length) {
+    return null;
+  }
+
+  return (
+    <div className="image-task-list">
+      {tasks.map((task) => (
+        <div className="image-task-row" key={task.id}>
+          <div>
+            <strong>{task.file_name}</strong>
+            <span>{t(stageLabelKey(task.stage ?? task.status))}</span>
+            {task.error ? <em>{task.error}</em> : null}
+          </div>
+          <span className={task.status === "failed" ? "pill warning" : "pill"}>
+            {task.status === "completed"
+              ? t("portfolio.imageRowsRecognized", { count: task.recognized_rows })
+              : t(statusLabelKey(task.status))}
+          </span>
+          {task.status === "running" || task.status === "queued" ? (
+            <button className="ghost-button fit-button" type="button" onClick={() => onCancel(task.id)}>
+              <X size={16} />
+              {t("common.cancel")}
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function positionTableCell(position: PortfolioPosition, field: PositionTableDisplayField) {
+  switch (field) {
+    case "symbol":
+      return <strong>{position.symbol}</strong>;
+    case "name":
+      return position.name;
+    case "market":
+      return position.market ?? "Other";
+    case "quantity":
+      return number(position.quantity);
+    case "average_cost":
+      return formatMoney(position.average_cost, position.currency);
+    case "market_value":
+      return formatMoney(position.market_value, position.currency);
+    case "unrealized_pnl":
+      return formatMoney(position.unrealized_pnl, position.currency);
+    case "weight":
+      return percent(position.weight);
+  }
+}
+
+function positionTableCellClass(position: PortfolioPosition, field: PositionTableDisplayField) {
+  if (field !== "unrealized_pnl") {
+    return undefined;
+  }
+  return position.unrealized_pnl >= 0 ? "positive-text" : "warning-text";
 }
 
 const emptyMapping: PortfolioImportMapping = {
@@ -565,6 +1064,42 @@ const emptyMapping: PortfolioImportMapping = {
   average_cost: "",
   currency: ""
 };
+
+const portfolioImportFileAccept = ".csv,.tsv,.xlsx,image/png,image/jpeg,image/jpg,image/webp";
+
+const positionTableFieldLabels: Record<PositionTableDisplayField, TranslationKey> = {
+  symbol: "portfolio.tableSymbol",
+  name: "portfolio.tableName",
+  market: "portfolio.mapMarket",
+  quantity: "portfolio.tableQty",
+  average_cost: "portfolio.tableAvgCost",
+  market_value: "portfolio.tableMarketValue",
+  unrealized_pnl: "portfolio.tablePl",
+  weight: "portfolio.tableWeight"
+};
+
+const performancePeriodOptions: Array<{ value: PortfolioPerformancePeriod; labelKey: TranslationKey }> = [
+  { value: "month", labelKey: "portfolio.periodMonth" },
+  { value: "year", labelKey: "portfolio.periodYear" },
+  { value: "since_inception", labelKey: "portfolio.periodSinceInception" }
+];
+
+const performanceViewOptions: Array<{ value: PerformanceView; labelKey: TranslationKey }> = [
+  { value: "amount", labelKey: "portfolio.viewAmount" },
+  { value: "percent", labelKey: "portfolio.viewPercent" }
+];
+
+const benchmarkMetricOptions: Array<{ value: BenchmarkComparisonMetric; labelKey: TranslationKey }> = [
+  { value: "cumulative", labelKey: "portfolio.benchmarkMetricCumulative" },
+  { value: "annualized", labelKey: "portfolio.benchmarkMetricAnnualized" },
+  { value: "excess", labelKey: "portfolio.benchmarkMetricExcess" }
+];
+
+const benchmarkVisuals: Array<{ key: string; labelKey: TranslationKey; color: string }> = [
+  { key: "sp500", labelKey: "portfolio.benchmarkSp500", color: "#4c6fbf" },
+  { key: "hang_seng", labelKey: "portfolio.benchmarkHangSeng", color: "#b46b40" },
+  { key: "sse", labelKey: "portfolio.benchmarkSse", color: "#8561a8" }
+];
 
 const mappingFields: Array<{ key: keyof PortfolioImportMapping; labelKey: TranslationKey }> = [
   { key: "symbol", labelKey: "portfolio.mapSymbol" },
@@ -579,18 +1114,17 @@ const mappingFields: Array<{ key: keyof PortfolioImportMapping; labelKey: Transl
   { key: "notes", labelKey: "portfolio.mapNotes" }
 ];
 
-const draftFields: Array<{ key: PortfolioDraftEditableField; labelKey: TranslationKey }> = [
-  { key: "symbol", labelKey: "portfolio.mapSymbol" },
-  { key: "name", labelKey: "portfolio.mapName" },
-  { key: "quantity", labelKey: "portfolio.mapQuantity" },
-  { key: "average_cost", labelKey: "portfolio.mapAverageCost" },
-  { key: "currency", labelKey: "portfolio.mapCurrency" },
-  { key: "market", labelKey: "portfolio.mapMarket" },
-  { key: "account", labelKey: "portfolio.mapAccount" },
-  { key: "sector", labelKey: "portfolio.mapSector" },
-  { key: "imported_market_value", labelKey: "portfolio.mapImportedMarketValue" },
-  { key: "notes", labelKey: "portfolio.mapNotes" }
-];
+const draftFieldLabels: Record<(typeof draftEditableDisplayFields)[number], TranslationKey> = {
+  symbol: "portfolio.mapSymbol",
+  name: "portfolio.mapName",
+  quantity: "portfolio.mapQuantity",
+  average_cost: "portfolio.mapAverageCost",
+  currency: "portfolio.mapCurrency",
+  market: "portfolio.mapMarket"
+};
+
+const draftFields: Array<{ key: (typeof draftEditableDisplayFields)[number]; labelKey: TranslationKey }> =
+  draftEditableDisplayFields.map((key) => ({ key, labelKey: draftFieldLabels[key] }));
 
 const editFields: Array<{ key: keyof PositionEditDraft; labelKey: TranslationKey }> = [
   { key: "name", labelKey: "portfolio.mapName" },
@@ -603,6 +1137,46 @@ const editFields: Array<{ key: keyof PositionEditDraft; labelKey: TranslationKey
   { key: "imported_market_value", labelKey: "portfolio.mapImportedMarketValue" },
   { key: "notes", labelKey: "portfolio.mapNotes" }
 ];
+
+function statusLabelKey(status: ImageImportTaskState["status"]): TranslationKey {
+  switch (status) {
+    case "queued":
+      return "portfolio.imageStatusQueued";
+    case "running":
+      return "portfolio.imageStatusRunning";
+    case "completed":
+      return "portfolio.imageStatusCompleted";
+    case "failed":
+      return "portfolio.imageStatusFailed";
+    case "canceled":
+      return "portfolio.imageStatusCanceled";
+  }
+}
+
+function stageLabelKey(stage: string): TranslationKey {
+  switch (stage) {
+    case "accepted":
+      return "portfolio.imageStageAccepted";
+    case "validating_image":
+      return "portfolio.imageStageValidating";
+    case "writing_temp_image":
+      return "portfolio.imageStageUploading";
+    case "recognizing_image":
+      return "portfolio.imageStageRecognizing";
+    case "normalizing_rows":
+      return "portfolio.imageStageNormalizing";
+    case "resolving_symbols":
+      return "portfolio.imageStageResolvingSymbols";
+    case "completed":
+      return "portfolio.imageStatusCompleted";
+    case "failed":
+      return "portfolio.imageStatusFailed";
+    case "canceled":
+      return "portfolio.imageStatusCanceled";
+    default:
+      return "portfolio.imageStatusQueued";
+  }
+}
 
 async function fileToPayload(file: File): Promise<FilePayload> {
   if (file.name.endsWith(".xlsx")) {
@@ -637,16 +1211,6 @@ async function fileToBase64(file: File) {
   return btoa(binary);
 }
 
-function extensionForMime(mimeType: string) {
-  if (mimeType === "image/jpeg" || mimeType === "image/jpg") {
-    return "jpg";
-  }
-  if (mimeType === "image/webp") {
-    return "webp";
-  }
-  return "png";
-}
-
 function mimeFromName(fileName: string) {
   const lowerName = fileName.toLowerCase();
   if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) {
@@ -658,11 +1222,88 @@ function mimeFromName(fileName: string) {
   return "image/png";
 }
 
+function makeRequestId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function number(value: number) {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 4 }).format(value);
+}
+
+function formatOptionalPercent(value: number | null | undefined) {
+  return value === null || value === undefined ? "—" : percent(value);
+}
+
+function formatPercentPoints(value: number | null | undefined) {
+  return value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)} pp`;
+}
+
+function formatChartTick(value: number, metric: BenchmarkComparisonMetric) {
+  return metric === "excess" ? `${value}pp` : `${value}%`;
+}
+
+function formatChartValue(value: number, metric: BenchmarkComparisonMetric) {
+  return metric === "excess" ? `${value.toFixed(2)} pp` : `${value.toFixed(2)}%`;
+}
+
+function shortDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value.slice(0, 10);
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  })
+    .format(date)
+    .replaceAll("/", "-");
+}
+
+function benchmarkLabel(
+  key: string,
+  fallback: string,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+) {
+  const visual = benchmarkVisuals.find((item) => item.key === key);
+  return visual ? t(visual.labelKey) : fallback;
+}
+
+function benchmarkLineLabel(
+  metric: BenchmarkComparisonMetric,
+  labelKey: TranslationKey,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+) {
+  const label = t(labelKey);
+  return metric === "excess" ? t("portfolio.benchmarkExcessLabel", { benchmark: label }) : label;
+}
+
+function benchmarkStatusValue(
+  benchmark: PortfolioPerformanceResponse["benchmarks"][number],
+  performance: PortfolioPerformanceResponse | undefined,
+  metric: BenchmarkComparisonMetric,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+) {
+  if (!benchmark.available) {
+    return t("portfolio.benchmarkUnavailable");
+  }
+  if (metric === "annualized") {
+    return formatOptionalPercent(benchmark.annualized_return_pct);
+  }
+  if (metric === "excess") {
+    const portfolioReturn = performance?.portfolio.return_pct;
+    const benchmarkReturn = benchmark.return_pct;
+    if (portfolioReturn === null || portfolioReturn === undefined || benchmarkReturn === null || benchmarkReturn === undefined) {
+      return "—";
+    }
+    return formatPercentPoints(portfolioReturn - benchmarkReturn);
+  }
+  return formatOptionalPercent(benchmark.return_pct);
 }
 
 function invalidatePortfolio(queryClient: ReturnType<typeof useQueryClient>) {
   queryClient.invalidateQueries({ queryKey: ["positions"] });
   queryClient.invalidateQueries({ queryKey: ["portfolio-summary"] });
+  queryClient.invalidateQueries({ queryKey: ["portfolio-performance"] });
 }

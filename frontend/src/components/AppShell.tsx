@@ -2,25 +2,12 @@ import type { ReactNode } from "react";
 import {
   BarChart3,
   BookOpenText,
-  ClipboardList,
   Compass,
-  GitFork,
-  LayoutDashboard,
-  Library,
-  Settings,
-  ShieldCheck
+  Settings
 } from "lucide-react";
 import { useI18n, type Locale } from "../i18n";
 
-export type ViewKey =
-  | "dashboard"
-  | "portfolio"
-  | "decision-deltas"
-  | "memos"
-  | "research"
-  | "system"
-  | "profile"
-  | "settings";
+export type ViewKey = "portfolio" | "memos" | "settings";
 
 interface AppShellProps {
   activeView: ViewKey;
@@ -29,13 +16,8 @@ interface AppShellProps {
 }
 
 const navItems = [
-  { key: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
   { key: "portfolio", labelKey: "nav.portfolio", icon: BarChart3 },
-  { key: "decision-deltas", labelKey: "nav.decisionDeltas", icon: GitFork },
   { key: "memos", labelKey: "nav.memos", icon: BookOpenText },
-  { key: "research", labelKey: "nav.research", icon: Library },
-  { key: "system", labelKey: "nav.system", icon: ClipboardList },
-  { key: "profile", labelKey: "nav.profile", icon: ShieldCheck },
   { key: "settings", labelKey: "nav.settings", icon: Settings }
 ] as const;
 

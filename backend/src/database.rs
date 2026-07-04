@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use sqlx::{Executor, SqlitePool};
+use sqlx::{Executor, Row, SqlitePool};
 
 pub fn ensure_sqlite_file(database_url: &str) -> anyhow::Result<()> {
     let Some(path) = database_url.strip_prefix("sqlite://") else {
@@ -63,6 +63,28 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     pool.execute(
         r#"
+        CREATE TABLE IF NOT EXISTS security_symbols (
+            symbol TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            market TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .await?;
+    migrate_security_symbols_schema(pool).await?;
+
+    pool.execute("CREATE INDEX IF NOT EXISTS idx_security_symbols_name ON security_symbols(name);")
+        .await?;
+
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_security_symbols_market_currency ON security_symbols(market, currency);",
+    )
+    .await?;
+
+    pool.execute(
+        r#"
         CREATE TABLE IF NOT EXISTS portfolio_positions (
             symbol TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -96,6 +118,72 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             updated_at TEXT NOT NULL,
             stale INTEGER NOT NULL,
             PRIMARY KEY(from_currency, to_currency)
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS portfolio_performance_snapshots (
+            id TEXT PRIMARY KEY,
+            captured_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            base_currency TEXT NOT NULL,
+            total_market_value_base REAL NOT NULL,
+            total_cost_base REAL NOT NULL,
+            total_unrealized_pnl_base REAL NOT NULL
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_portfolio_performance_snapshots_captured_at
+        ON portfolio_performance_snapshots(captured_at);
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS portfolio_benchmark_snapshots (
+            id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL,
+            benchmark_key TEXT NOT NULL,
+            label TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            price REAL,
+            fx_rate REAL,
+            value_base REAL,
+            source TEXT,
+            stale INTEGER NOT NULL,
+            error TEXT,
+            captured_at TEXT NOT NULL,
+            FOREIGN KEY(snapshot_id) REFERENCES portfolio_performance_snapshots(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_portfolio_benchmark_snapshots_key_time
+        ON portfolio_benchmark_snapshots(benchmark_key, captured_at);
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS portfolio_refresh_state (
+            key TEXT PRIMARY KEY,
+            attempted_at TEXT,
+            succeeded_at TEXT,
+            status TEXT NOT NULL,
+            error TEXT
         );
         "#,
     )
@@ -227,5 +315,44 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .await?;
 
+    Ok(())
+}
+
+async fn migrate_security_symbols_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query("PRAGMA table_info(security_symbols);")
+        .fetch_all(pool)
+        .await?;
+    let columns = rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    let expected = ["symbol", "name", "market", "currency", "updated_at"];
+    if columns == expected {
+        return Ok(());
+    }
+
+    pool.execute("ALTER TABLE security_symbols RENAME TO security_symbols_legacy;")
+        .await?;
+    pool.execute(
+        r#"
+        CREATE TABLE security_symbols (
+            symbol TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            market TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+        INSERT INTO security_symbols (symbol, name, market, currency, updated_at)
+        SELECT symbol, name, market, currency, updated_at
+        FROM security_symbols_legacy;
+        "#,
+    )
+    .await?;
+    pool.execute("DROP TABLE security_symbols_legacy;").await?;
     Ok(())
 }

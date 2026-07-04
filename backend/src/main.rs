@@ -37,7 +37,19 @@ async fn main() -> anyhow::Result<()> {
         pool.clone(),
         market_provider.clone(),
         config.price_refresh_interval_secs,
+        config.price_refresh_ttl_secs,
     );
+    if !config
+        .symbol_directory_provider
+        .trim()
+        .eq_ignore_ascii_case("local")
+    {
+        portfolio::start_symbol_directory_refresh_job(
+            pool.clone(),
+            config.symbol_directory_provider.clone(),
+            config.symbol_directory_refresh_interval_secs,
+        );
+    }
 
     let app = startup::build_router(pool, ai_provider, market_provider);
     let addr: SocketAddr = config.bind_addr.parse()?;

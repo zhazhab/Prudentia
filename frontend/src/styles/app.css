@@ -233,7 +233,7 @@ button {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
 
@@ -254,8 +254,7 @@ button {
 
 .stat-card-head,
 .panel-head,
-.attribute-card-head,
-.legend-row {
+.attribute-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -296,10 +295,63 @@ button {
   color: #a84f5f;
 }
 
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
-  gap: 20px;
+.performance-panel {
+  padding: 16px 18px;
+}
+
+.performance-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.performance-toolbar h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.performance-toolbar p {
+  margin: 6px 0 0;
+  color: #687267;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.performance-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.segmented-control {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #d7dbd2;
+  border-radius: 8px;
+  background: #f6f8f3;
+}
+
+.segmented-control button {
+  min-width: 74px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  color: #56625b;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.segmented-control button.active {
+  color: #1f3a38;
+  background: #ffffff;
+  box-shadow: 0 1px 5px rgba(45, 59, 54, 0.12);
 }
 
 .panel {
@@ -323,7 +375,6 @@ button {
   align-items: center;
 }
 
-.legend-list,
 .memo-list,
 .attribute-list,
 .badge-list,
@@ -335,31 +386,22 @@ button {
   gap: 10px;
 }
 
-.legend-row {
-  padding: 9px 0;
-  border-bottom: 1px solid #edf0e9;
-  font-size: 14px;
-}
-
-.legend-row span {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-}
-
-.legend-row strong {
-  flex: 1;
-}
-
-.legend-row em {
-  color: #687267;
-  font-style: normal;
-}
-
 .empty-state {
   padding: 22px;
   color: #4c564c;
   background: #fbfcf8;
+}
+
+.empty-state-head,
+.draft-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.empty-state-head strong {
+  min-width: 0;
 }
 
 .signal-grid {
@@ -741,9 +783,56 @@ textarea:focus {
   gap: 8px;
 }
 
-.market-stack {
+.image-task-list {
   display: grid;
-  gap: 14px;
+  gap: 8px;
+}
+
+.image-task-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e0e4dc;
+  border-radius: 8px;
+  background: #fbfcf8;
+}
+
+.image-task-row div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.image-task-row strong,
+.image-task-row span,
+.image-task-row em {
+  overflow-wrap: anywhere;
+}
+
+.image-task-row span,
+.image-task-row em {
+  color: #687267;
+  font-size: 12px;
+}
+
+.performance-chart-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.chart-note {
+  margin: -4px 0 0;
+  color: #687267;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.benchmark-status-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .row-actions {
@@ -770,6 +859,15 @@ textarea:focus {
   border-radius: 8px;
 }
 
+.draft-table-shell {
+  display: grid;
+  gap: 8px;
+}
+
+.draft-table-toolbar {
+  justify-content: flex-end;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -778,7 +876,7 @@ table {
 }
 
 .draft-table {
-  min-width: 1180px;
+  min-width: 760px;
 }
 
 .draft-input {
@@ -795,6 +893,22 @@ table {
 .draft-input:focus {
   outline: 2px solid rgba(47, 111, 115, 0.22);
   border-color: #2f6f73;
+}
+
+.draft-input.error {
+  border-color: #c45564;
+  background: #fff8f8;
+}
+
+.draft-input.error:focus {
+  outline-color: rgba(196, 85, 100, 0.24);
+}
+
+.draft-symbol-cell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
+  align-items: center;
 }
 
 th,
@@ -996,7 +1110,6 @@ th {
   }
 
   .stats-grid,
-  .dashboard-grid,
   .editor-grid,
   .signal-grid,
   .system-form,
@@ -1016,6 +1129,15 @@ th {
   .image-import-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .performance-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .performance-controls {
+    justify-content: flex-start;
   }
 
   .import-actions {
@@ -1059,6 +1181,15 @@ th {
   .import-actions .ghost-button,
   .import-actions .file-button {
     width: 100%;
+  }
+
+  .segmented-control {
+    width: 100%;
+    grid-auto-flow: column;
+  }
+
+  .segmented-control button {
+    min-width: 0;
   }
 
   .nav-list {
