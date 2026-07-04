@@ -1282,6 +1282,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zhhz",
+ "zip",
 ]
 
 [[package]]
@@ -2896,6 +2898,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zhhz"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498f7534da98ac5232cce2aa5f9010a33f1f51d6b41b431cfda99d9beff4ffeb"
+dependencies = [
+ "anyhow",
+ "memchr",
+ "serde_json",
 ]
 
 [[package]]

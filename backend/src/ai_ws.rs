@@ -1,4 +1,8 @@
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
+};
 
 use axum::{
     extract::{
@@ -17,6 +21,7 @@ use crate::{
 
 const MAX_ACTIVE_TASKS_PER_CONNECTION: usize = 2;
 const PORTFOLIO_IMAGE_IMPORT_ARTIFACT: &str = "portfolio_image_import.preview";
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -66,20 +71,26 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<SocketEvent>();
     let mut active_tasks: HashMap<String, JoinHandle<()>> = HashMap::new();
     let connected_at = Instant::now();
+    let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
 
-    tracing::info!("AI websocket connected");
+    tracing::info!(
+        connection_id,
+        active_tasks = active_tasks.len(),
+        "AI websocket connection established"
+    );
 
     loop {
         tokio::select! {
             Some(event) = events_rx.recv() => {
                 match event {
                     SocketEvent::Send(message) => {
-                        if !send_message(&mut socket, message).await {
+                        if !send_message(&mut socket, message, connection_id).await {
                             break;
                         }
                     }
                     SocketEvent::Finished(request_id) => {
                         tracing::debug!(
+                            connection_id,
                             request_id = %request_id,
                             active_tasks = active_tasks.len().saturating_sub(1),
                             "AI websocket task removed from active set"
@@ -96,6 +107,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 match incoming {
                     Ok(Message::Text(text)) => {
                         tracing::debug!(
+                            connection_id,
                             bytes = text.len(),
                             active_tasks = active_tasks.len(),
                             "AI websocket client message received"
@@ -105,10 +117,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             &state,
                             &events_tx,
                             &mut active_tasks,
+                            connection_id,
                         );
                     }
                     Ok(Message::Close(_)) => {
                         tracing::info!(
+                            connection_id,
                             active_tasks = active_tasks.len(),
                             connected_ms = connected_at.elapsed().as_millis(),
                             "AI websocket close frame received"
@@ -117,7 +131,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     }
                     Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Binary(_)) => {}
                     Err(error) => {
-                        tracing::debug!(error = %error, "AI websocket receive failed");
+                        tracing::debug!(
+                            connection_id,
+                            error = %error,
+                            "AI websocket receive failed"
+                        );
                         break;
                     }
                 }
@@ -130,6 +148,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         handle.abort();
     }
     tracing::info!(
+        connection_id,
         connected_ms = connected_at.elapsed().as_millis(),
         aborted_tasks,
         "AI websocket disconnected"
@@ -141,11 +160,13 @@ fn handle_client_text(
     state: &AppState,
     events_tx: &mpsc::UnboundedSender<SocketEvent>,
     active_tasks: &mut HashMap<String, JoinHandle<()>>,
+    connection_id: u64,
 ) {
     let message = match serde_json::from_str::<AiWsClientMessage>(&text) {
         Ok(message) => message,
         Err(error) => {
             tracing::warn!(
+                connection_id,
                 error = %sanitize_error(error.to_string()),
                 "AI websocket client message decode failed"
             );
@@ -161,6 +182,15 @@ fn handle_client_text(
         }
     };
 
+    let (request_id, message_type) = client_message_summary(&message);
+    tracing::info!(
+        connection_id,
+        request_id = %request_id,
+        message_type,
+        active_tasks = active_tasks.len(),
+        "AI websocket client message decoded"
+    );
+
     match message {
         AiWsClientMessage::PortfolioImageImportStart {
             request_id,
@@ -171,6 +201,7 @@ fn handle_client_text(
             state.clone(),
             events_tx,
             active_tasks,
+            connection_id,
         ),
         AiWsClientMessage::Cancel { request_id } => {
             let canceled_running_task = if let Some(handle) = active_tasks.remove(&request_id) {
@@ -180,6 +211,7 @@ fn handle_client_text(
                 false
             };
             tracing::info!(
+                connection_id,
                 request_id = %request_id,
                 canceled_running_task,
                 active_tasks = active_tasks.len(),
@@ -196,9 +228,11 @@ fn start_portfolio_image_import(
     state: AppState,
     events_tx: &mpsc::UnboundedSender<SocketEvent>,
     active_tasks: &mut HashMap<String, JoinHandle<()>>,
+    connection_id: u64,
 ) {
     if active_tasks.contains_key(&request_id) {
         tracing::warn!(
+            connection_id,
             request_id = %request_id,
             "AI websocket task rejected because request_id is already active"
         );
@@ -215,6 +249,7 @@ fn start_portfolio_image_import(
 
     if active_tasks.len() >= MAX_ACTIVE_TASKS_PER_CONNECTION {
         tracing::warn!(
+            connection_id,
             request_id = %request_id,
             active_tasks = active_tasks.len(),
             max_active_tasks = MAX_ACTIVE_TASKS_PER_CONNECTION,
@@ -231,11 +266,13 @@ fn start_portfolio_image_import(
         return;
     }
 
+    let active_tasks_after_accept = active_tasks.len() + 1;
     tracing::info!(
+        connection_id,
         request_id = %request_id,
         file_name = %payload.file_name,
         mime_type = payload.mime_type.as_deref().unwrap_or("unknown"),
-        active_tasks = active_tasks.len(),
+        active_tasks = active_tasks_after_accept,
         "AI websocket portfolio image import accepted"
     );
     send_socket_event(
@@ -248,7 +285,8 @@ fn start_portfolio_image_import(
     let task_request_id = request_id.clone();
     let task_tx = events_tx.clone();
     let handle = tokio::spawn(async move {
-        run_portfolio_image_import_task(task_request_id, state, payload, task_tx).await;
+        run_portfolio_image_import_task(task_request_id, state, payload, task_tx, connection_id)
+            .await;
     });
     active_tasks.insert(request_id, handle);
 }
@@ -258,17 +296,22 @@ async fn run_portfolio_image_import_task(
     state: AppState,
     payload: PortfolioImageImportPreviewRequest,
     events_tx: mpsc::UnboundedSender<SocketEvent>,
+    connection_id: u64,
 ) {
     let started_at = Instant::now();
     let progress_tx = events_tx.clone();
     let progress_request_id = request_id.clone();
-    let result =
-        portfolio::preview_image_import_with_progress(state.ai.clone(), payload, move |stage| {
+    let result = portfolio::preview_image_import_with_progress(
+        Some(state.pool.clone()),
+        state.ai.clone(),
+        payload,
+        move |stage| {
             let tx = progress_tx.clone();
             let request_id = progress_request_id.clone();
             let elapsed_ms = started_at.elapsed().as_millis();
             async move {
                 tracing::info!(
+                    connection_id,
                     request_id = %request_id,
                     stage,
                     elapsed_ms,
@@ -282,8 +325,9 @@ async fn run_portfolio_image_import_task(
                     },
                 );
             }
-        })
-        .await;
+        },
+    )
+    .await;
 
     match result {
         Ok(preview) => {
@@ -300,6 +344,7 @@ async fn run_portfolio_image_import_task(
                 })
             });
             tracing::info!(
+                connection_id,
                 request_id = %request_id,
                 elapsed_ms = started_at.elapsed().as_millis(),
                 row_count,
@@ -319,6 +364,7 @@ async fn run_portfolio_image_import_task(
         Err(error) => {
             let sanitized_error = sanitize_error(error.to_string());
             tracing::warn!(
+                connection_id,
                 request_id = %request_id,
                 elapsed_ms = started_at.elapsed().as_millis(),
                 error = %sanitized_error,
@@ -339,42 +385,74 @@ async fn run_portfolio_image_import_task(
 }
 
 fn send_socket_event(events_tx: &mpsc::UnboundedSender<SocketEvent>, message: AiWsServerMessage) {
-    if let Some((request_id, message_type)) = server_message_summary(&message) {
-        tracing::debug!(
-            request_id = %request_id,
-            message_type,
-            "AI websocket server event queued"
-        );
-    }
+    let (request_id, message_type) = server_message_summary(&message);
+    tracing::debug!(
+        request_id = %request_id,
+        message_type,
+        "AI websocket server event queued"
+    );
     let _ = events_tx.send(SocketEvent::Send(message));
 }
 
-async fn send_message(socket: &mut WebSocket, message: AiWsServerMessage) -> bool {
+async fn send_message(
+    socket: &mut WebSocket,
+    message: AiWsServerMessage,
+    connection_id: u64,
+) -> bool {
+    let (request_id, message_type) = server_message_summary(&message);
     let text = match serde_json::to_string(&message) {
         Ok(text) => text,
         Err(error) => {
-            tracing::warn!(error = %error, "failed to serialize AI websocket message");
+            tracing::warn!(
+                connection_id,
+                request_id = %request_id,
+                message_type,
+                error = %error,
+                "failed to serialize AI websocket message"
+            );
             return true;
         }
     };
 
     match socket.send(Message::Text(text.into())).await {
-        Ok(()) => true,
+        Ok(()) => {
+            tracing::info!(
+                connection_id,
+                request_id = %request_id,
+                message_type,
+                "AI websocket server message sent"
+            );
+            true
+        }
         Err(error) => {
-            tracing::debug!(error = %error, "AI websocket send failed");
+            tracing::debug!(
+                connection_id,
+                request_id = %request_id,
+                message_type,
+                error = %error,
+                "AI websocket send failed"
+            );
             false
         }
     }
 }
 
-fn server_message_summary(message: &AiWsServerMessage) -> Option<(&str, &'static str)> {
+fn client_message_summary(message: &AiWsClientMessage) -> (&str, &'static str) {
     match message {
-        AiWsServerMessage::Accepted { request_id } => Some((request_id, "accepted")),
-        AiWsServerMessage::Progress { request_id, .. } => Some((request_id, "progress")),
-        AiWsServerMessage::Completed { request_id, .. } => Some((request_id, "completed")),
-        AiWsServerMessage::Failed { request_id, .. } if request_id.is_empty() => None,
-        AiWsServerMessage::Failed { request_id, .. } => Some((request_id, "failed")),
-        AiWsServerMessage::Canceled { request_id } => Some((request_id, "canceled")),
+        AiWsClientMessage::PortfolioImageImportStart { request_id, .. } => {
+            (request_id, "portfolio_image_import.start")
+        }
+        AiWsClientMessage::Cancel { request_id } => (request_id, "cancel"),
+    }
+}
+
+fn server_message_summary(message: &AiWsServerMessage) -> (&str, &'static str) {
+    match message {
+        AiWsServerMessage::Accepted { request_id } => (request_id, "accepted"),
+        AiWsServerMessage::Progress { request_id, .. } => (request_id, "progress"),
+        AiWsServerMessage::Completed { request_id, .. } => (request_id, "completed"),
+        AiWsServerMessage::Failed { request_id, .. } => (request_id, "failed"),
+        AiWsServerMessage::Canceled { request_id } => (request_id, "canceled"),
     }
 }
 
@@ -385,4 +463,28 @@ fn sanitize_error(error: String) -> String {
         lines.push_str("...");
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_message_summary_reports_type_and_request_id() {
+        let message = AiWsClientMessage::Cancel {
+            request_id: "request-1".to_string(),
+        };
+
+        assert_eq!(client_message_summary(&message), ("request-1", "cancel"));
+    }
+
+    #[test]
+    fn server_message_summary_reports_type_and_request_id() {
+        let message = AiWsServerMessage::Progress {
+            request_id: "request-2".to_string(),
+            stage: "recognizing".to_string(),
+        };
+
+        assert_eq!(server_message_summary(&message), ("request-2", "progress"));
+    }
 }

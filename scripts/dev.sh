@@ -5,8 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 MODE="${1:-all}"
-export AI_PROVIDER="${AI_PROVIDER:-mock}"
-export MARKET_DATA_PROVIDER="${MARKET_DATA_PROVIDER:-mock}"
+BACKEND_RUST_LOG="${BACKEND_RUST_LOG:-prudentia_backend=info,tower_http=info}"
 
 BACKEND_PORT_START="${BACKEND_PORT:-8080}"
 FRONTEND_PORT_START="${FRONTEND_PORT:-5173}"
@@ -21,11 +20,12 @@ usage() {
 Usage: scripts/dev.sh [all|backend|frontend]
 
 Environment:
-  AI_PROVIDER             Defaults to mock
-  MARKET_DATA_PROVIDER    Defaults to mock
+  AI_PROVIDER             Override .env AI provider for this run
+  MARKET_DATA_PROVIDER    Override .env market data provider for this run
   BACKEND_PORT            Preferred backend port, defaults to 8080
   FRONTEND_PORT           Preferred frontend port, defaults to 5173
   SKIP_NPM_INSTALL=1      Do not install frontend dependencies automatically
+  BACKEND_RUST_LOG        Backend tracing filter for dev startup
 USAGE
 }
 
@@ -132,7 +132,7 @@ case "$MODE" in
   all | dev | start)
     choose_ports
     ensure_frontend_deps
-    start_service "backend" env BIND_ADDR="127.0.0.1:$BACKEND_PORT" cargo run -p prudentia-backend
+    start_service "backend" env RUST_LOG="$BACKEND_RUST_LOG" BIND_ADDR="127.0.0.1:$BACKEND_PORT" cargo run -p prudentia-backend
     start_service "frontend" env VITE_API_BASE_URL="http://127.0.0.1:$BACKEND_PORT" npm --prefix frontend run dev -- --port "$FRONTEND_PORT" --strictPort
     wait_for_services
     ;;
@@ -141,7 +141,7 @@ case "$MODE" in
     if [[ "$BACKEND_PORT" != "$BACKEND_PORT_START" ]]; then
       echo "Backend port $BACKEND_PORT_START is unavailable; using $BACKEND_PORT instead."
     fi
-    exec env BIND_ADDR="127.0.0.1:$BACKEND_PORT" cargo run -p prudentia-backend
+    exec env RUST_LOG="$BACKEND_RUST_LOG" BIND_ADDR="127.0.0.1:$BACKEND_PORT" cargo run -p prudentia-backend
     ;;
   frontend)
     FRONTEND_PORT="$(find_available_port "$FRONTEND_PORT_START")"

@@ -90,10 +90,14 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 - `GET /api/ai/ws`（用于截图识别和未来 AI 任务的 WebSocket）
 - `POST /api/portfolio/import/draft/commit`
 - `POST /api/portfolio/import/commit`
+- `GET /api/portfolio/symbols/search?q=浦发银行&market=CN&currency=CNY`
+- `POST /api/portfolio/symbols/refresh`
+- `POST /api/portfolio/symbols/resolve-draft`
 - `GET /api/portfolio/positions`
 - `PATCH /api/portfolio/positions/{symbol}`
 - `DELETE /api/portfolio/positions/{symbol}`
 - `GET /api/portfolio/summary`
+- `GET /api/portfolio/performance?period=month|year|since_inception`
 - `POST /api/portfolio/prices/refresh`
 
 文件预览请求会返回 headers、sample rows、建议 mapping，以及可编辑 `draft_rows`：
@@ -122,6 +126,47 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 ```
 
 导入 `.xlsx` 时，`content` 使用 base64，并将 `content_encoding` 设为 `base64`。
+
+本地证券代码库用于把草稿中的名称匹配到 `symbol`。默认 `SYMBOL_DIRECTORY_PROVIDER=public` 会在后端启动时自动后台检查 `SYMBOL_DIRECTORY_PUBLIC_CONFIG` 指向的免账号公开目录配置，默认文件为 `config/symbol-directory-public.json`；也可以通过 API 触发当前 provider 检查/刷新：
+
+```sh
+curl -X POST http://127.0.0.1:8080/api/portfolio/symbols/refresh
+```
+
+查询本地代码库：
+
+```sh
+curl "http://127.0.0.1:8080/api/portfolio/symbols/search?q=%E6%B5%A6%E5%8F%91%E9%93%B6%E8%A1%8C&market=CN&currency=CNY"
+curl "http://127.0.0.1:8080/api/portfolio/symbols/search?q=700&market=HK&currency=HKD"
+```
+
+搜索和草稿匹配会规范化短港股数字代码：例如 `700`、`0700` 或 `00700.HK` 会按 HKEX 代码规则匹配内部 `0700.HK`。草稿行缺少 `symbol` 时，匹配接口和确认导入都会先按名称、市场和币种尝试继承当前已有持仓的唯一 `symbol`；无法唯一确定时才查询本地 `security_symbols`。
+
+对当前草稿执行本地匹配：
+
+```json
+{
+  "rows": [
+    {
+      "symbol": "",
+      "name": "浦发银行",
+      "quantity": "100",
+      "average_cost": "10",
+      "currency": "CNY",
+      "account": null,
+      "market": "CN",
+      "sector": null,
+      "imported_market_value": "1000",
+      "notes": null,
+      "confidence": "high",
+      "warnings": [],
+      "errors": []
+    }
+  ]
+}
+```
+
+匹配只使用当前已有持仓和本地 `security_symbols`，不会在导入时实时请求 Yahoo 或其他外部搜索服务。public provider 的源 URL、缓存文件、标准化存量文件和过期时间都由 `config/symbol-directory-public.json` 配置；默认存量文件是 `data/symbol-directory/public/symbols.json`。启动时先导入这份文件，SQLite 只保存 `symbol/name/market/currency/updated_at`；只有 `updated_at` 超过 24 小时才异步刷新公开源并替换存量文件，失败只记录错误，不阻塞启动。
 
 截图识别通过统一 AI WebSocket 进行。发送 text message：
 
@@ -153,6 +198,7 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
       "account": null,
       "sector": "Technology",
       "imported_market_value": "250",
+      "last_price": "125",
       "notes": null,
       "confidence": "high",
       "warnings": [],
@@ -162,7 +208,7 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 }
 ```
 
-确认草稿会按 `symbol` 合并更新，不会删除本次草稿中没有出现的旧持仓。任何草稿行存在 `errors` 时都会被拒绝；低置信行只保留 warning，由用户校对后确认。
+确认草稿会先为缺少 `symbol` 的行执行同一套本地匹配，然后按 `symbol` 归并重复行：数量相加，平均成本按数量加权；如果行里有 `last_price`，市值按 `last_price × quantity` 计算，否则才使用 `imported_market_value`。币种或市场冲突会被拒绝。随后按 `symbol` 合并更新，不会删除本次草稿中没有出现的旧持仓。任何草稿行存在 `errors` 时都会被拒绝；低置信行只保留 warning，由用户校对后确认。
 
 `PATCH /api/portfolio/positions/{symbol}` 支持更新 `name`、`quantity`、`average_cost`、`currency`、`account`、`market`、`sector`、`imported_market_value` 和 `notes`。`DELETE /api/portfolio/positions/{symbol}` 用于删除清仓或错误持仓。
 
@@ -173,7 +219,16 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 - `market_groups`：按 market + currency 分组的 native 市值、CNY 市值和权重。
 - `fx_rates` / `fx_stale_count`：用于 CNY 口径的汇率和 stale 状态。
 
-market data provider 会刷新股票报价和 FX。Alpha Vantage provider 使用 `CURRENCY_EXCHANGE_RATE` 获取 FX；刷新失败时会保留最后成功汇率并标记 stale。
+`GET /api/portfolio/performance` 返回基于组合快照的收益表现。`period` 支持 `month`、`year` 和 `since_inception`，边界按 Asia/Shanghai 自然月/自然年。返回包含：
+
+- `portfolio`：周期起止 CNY 市值、金额收益 `end_value_base - start_value_base`、百分比收益 `end_value_base / start_value_base - 1` 和年化收益 `annualized_return_pct`。
+- `partial_period`：周期起点没有快照时为 `true`，客户端可显示“自 YYYY-MM-DD 起”。
+- `series`：组合快照序列，每个点包含累计收益率和可计算时的年化收益率。
+- `benchmarks`：标普、恒生、上证 ETF 代理（`SPY`、`2800.HK`、`510210.SS`）的同周期累计收益率和年化收益率。它们是指数代理，不是官方指数点位；抓取失败时标记 unavailable/stale，不阻塞组合表现。
+
+Performance v1 是组合市值快照变化视角，不处理交易流水、出入金、分红、手续费或复权。导入确认、编辑、删除和每日行情刷新都会写入快照。前端指数对比支持累计收益、年化收益和相对指数超额收益三个维度；超额收益按组合累计收益率减去指数代理累计收益率展示。
+
+Market data provider 会刷新股票报价、FX 和 benchmark ETF。Alpha Vantage provider 使用 `CURRENCY_EXCHANGE_RATE` 获取 FX；刷新失败时会保留最后成功汇率并标记 stale。后端启动和后台任务按每日 TTL 检查刷新，默认 24 小时；`POST /api/portfolio/prices/refresh` 保留为 API/内部能力，但当前前端不显示刷新按钮。
 
 ## Decisions
 

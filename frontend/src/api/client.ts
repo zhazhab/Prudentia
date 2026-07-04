@@ -1,17 +1,5 @@
 import type {
-  InvestmentSystem,
-  InvestmentSystemRefinement,
-  InvestorProfile,
-  AdoptResearchCandidatesRequest,
-  AdoptDecisionDeltaCandidatesRequest,
   AiSettings,
-  Decision,
-  DecisionDeltaDetail,
-  DecisionDeltaReview,
-  DecisionDeltaReviewRequest,
-  DecisionDeltaTimeline,
-  DecisionDeltaTimelineFilters,
-  DistillResearchRequest,
   Memo,
   MemoExtraction,
   PortfolioDraftCommitRequest,
@@ -19,12 +7,11 @@ import type {
   PortfolioImportMapping,
   PortfolioImportPreview,
   PortfolioImportResult,
+  PortfolioPerformancePeriod,
+  PortfolioPerformanceResponse,
   PortfolioPosition,
   PortfolioSummary,
-  PriceRefreshResult,
-  ResearchRecord,
-  RefreshDecisionDeltasResult,
-  StockSnapshotRequest,
+  PortfolioDraftSymbolResolveResult,
   UpdateAiSettings,
   UpdatePortfolioPosition
 } from "../types/domain";
@@ -70,17 +57,6 @@ export interface ImagePayload {
   mime_type: string;
 }
 
-function queryString(params: Record<string, string | undefined>) {
-  const search = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
-    if (value?.trim()) {
-      search.set(key, value.trim());
-    }
-  });
-  const value = search.toString();
-  return value ? `?${value}` : "";
-}
-
 export const api = {
   memos: () => request<Memo[]>("/api/memos/"),
   createMemo: (payload: Partial<Memo> & { title: string }) =>
@@ -90,82 +66,10 @@ export const api = {
     }),
   extractMemo: (id: string, languageTag?: string) =>
     request<MemoExtraction>(`/api/memos/${id}/ai/extract`, { method: "POST", languageTag }),
-  decisions: () => request<Decision[]>("/api/decisions/"),
-  decision: (id: string) => request<Decision>(`/api/decisions/${id}`),
-  decisionDeltaTimeline: (params: DecisionDeltaTimelineFilters = {}) =>
-    request<DecisionDeltaTimeline>(`/api/decision-deltas/timeline${queryString({ ...params })}`),
-  decisionDeltaDetail: (id: string, snapshotLimit?: number) =>
-    request<DecisionDeltaDetail>(
-      `/api/decision-deltas/${id}${queryString({
-        snapshot_limit: snapshotLimit == null ? undefined : String(snapshotLimit)
-      })}`
-    ),
-  refreshDecisionDeltas: (decisionIds?: string[]) =>
-    request<RefreshDecisionDeltasResult>("/api/decision-deltas/refresh", {
-      method: "POST",
-      body: JSON.stringify({ decision_ids: decisionIds })
-    }),
-  saveDecisionDeltaReview: (
-    id: string,
-    payload: DecisionDeltaReviewRequest,
-    languageTag?: string
-  ) =>
-    request<DecisionDeltaReview>(`/api/decision-deltas/${id}/review`, {
-      method: "PATCH",
-      body: JSON.stringify(payload),
-      languageTag
-    }),
-  adoptDecisionDeltaCandidates: (
-    id: string,
-    payload: AdoptDecisionDeltaCandidatesRequest,
-    languageTag?: string
-  ) =>
-    request<InvestmentSystem>(`/api/decision-deltas/${id}/adopt`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-      languageTag
-    }),
-  investmentSystem: (languageTag?: string) =>
-    request<InvestmentSystem>("/api/investment-system/", { languageTag }),
-  updateInvestmentSystem: (payload: Partial<InvestmentSystem>) =>
-    request<InvestmentSystem>("/api/investment-system/", {
-      method: "PATCH",
-      body: JSON.stringify(payload)
-    }),
-  refineInvestmentSystem: (languageTag?: string) =>
-    request<InvestmentSystemRefinement>("/api/investment-system/ai/refine", {
-      method: "POST",
-      languageTag
-    }),
-  researchRecords: (params: { kind?: string; symbol?: string; q?: string } = {}) =>
-    request<ResearchRecord[]>(`/api/research/records${queryString(params)}`),
-  researchRecord: (id: string) => request<ResearchRecord>(`/api/research/records/${id}`),
-  distillResearch: (payload: DistillResearchRequest, languageTag?: string) =>
-    request<ResearchRecord>("/api/research/distill", {
-      method: "POST",
-      body: JSON.stringify(payload),
-      languageTag
-    }),
-  stockSnapshot: (payload: StockSnapshotRequest, languageTag?: string) =>
-    request<ResearchRecord>("/api/research/stock-snapshot", {
-      method: "POST",
-      body: JSON.stringify(payload),
-      languageTag
-    }),
-  portfolioReview: (languageTag?: string) =>
-    request<ResearchRecord>("/api/research/portfolio-review", { method: "POST", languageTag }),
-  adoptResearchCandidates: (
-    id: string,
-    payload: AdoptResearchCandidatesRequest,
-    languageTag?: string
-  ) =>
-    request<InvestmentSystem>(`/api/research/records/${id}/adopt`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-      languageTag
-    }),
   positions: () => request<PortfolioPosition[]>("/api/portfolio/positions"),
   portfolioSummary: () => request<PortfolioSummary>("/api/portfolio/summary"),
+  portfolioPerformance: (period: PortfolioPerformancePeriod) =>
+    request<PortfolioPerformanceResponse>(`/api/portfolio/performance?period=${encodeURIComponent(period)}`),
   previewPortfolioImport: (payload: FilePayload) =>
     request<PortfolioImportPreview>("/api/portfolio/import/preview", {
       method: "POST",
@@ -181,11 +85,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  commitPortfolioImport: (payload: FilePayload & { mapping: PortfolioImportMapping }) =>
-    request<PortfolioImportResult>("/api/portfolio/import/commit", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
   updatePosition: (symbol: string, payload: UpdatePortfolioPosition) =>
     request<PortfolioPosition>(`/api/portfolio/positions/${encodeURIComponent(symbol)}`, {
       method: "PATCH",
@@ -195,9 +94,11 @@ export const api = {
     request<PortfolioPosition[]>(`/api/portfolio/positions/${encodeURIComponent(symbol)}`, {
       method: "DELETE"
     }),
-  refreshPrices: () =>
-    request<PriceRefreshResult>("/api/portfolio/prices/refresh", { method: "POST" }),
-  profile: (languageTag?: string) => request<InvestorProfile>("/api/profile", { languageTag }),
+  resolvePortfolioDraftSymbols: (payload: PortfolioDraftCommitRequest) =>
+    request<PortfolioDraftSymbolResolveResult>("/api/portfolio/symbols/resolve-draft", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
   aiSettings: () => request<AiSettings>("/api/settings/ai"),
   updateAiSettings: (payload: UpdateAiSettings) =>
     request<AiSettings>("/api/settings/ai", {

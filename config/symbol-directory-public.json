@@ -1,0 +1,51 @@
+{
+  "cache_dir": "data/symbol-directory/public",
+  "inventory_file": "data/symbol-directory/public/symbols.json",
+  "cache_ttl_secs": 86400,
+  "sources": [
+    {
+      "id": "hkex",
+      "kind": "hkex",
+      "url": "https://www.hkex.com.hk/eng/services/trading/securities/securitieslists/ListOfSecurities.xlsx",
+      "cache_file": "public_hkex.xlsx",
+      "provider": "public:hkex"
+    },
+    {
+      "id": "hkex_zh",
+      "kind": "hkex",
+      "url": "https://www.hkex.com.hk/chi/services/trading/securities/securitieslists/ListOfSecurities_c.xlsx",
+      "cache_file": "public_hkex_zh.xlsx",
+      "provider": "public:hkex_zh"
+    },
+    {
+      "id": "nasdaq_listed",
+      "kind": "nasdaq_listed",
+      "url": "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt",
+      "cache_file": "nasdaq_listed.txt",
+      "provider": "public:nasdaq"
+    },
+    {
+      "id": "nasdaq_other_listed",
+      "kind": "nasdaq_other_listed",
+      "url": "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt",
+      "cache_file": "nasdaq_other_listed.txt",
+      "provider": "public:nasdaq"
+    },
+    {
+      "id": "sse_stock",
+      "kind": "sse_suggest",
+      "url": "https://www.sse.com.cn/js/common/ssesuggestdata.js",
+      "cache_file": "sse_stock.js",
+      "provider": "public:sse",
+      "asset_type": "stock"
+    },
+    {
+      "id": "sse_fund",
+      "kind": "sse_suggest",
+      "url": "https://www.sse.com.cn/js/common/ssesuggestfunddata.js",
+      "cache_file": "sse_fund.js",
+      "provider": "public:sse",
+      "asset_type": "fund"
+    }
+  ]
+}

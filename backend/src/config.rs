@@ -15,6 +15,9 @@ pub struct AppConfig {
     pub market_data_provider: String,
     pub alpha_vantage_api_key: Option<String>,
     pub price_refresh_interval_secs: Duration,
+    pub price_refresh_ttl_secs: Duration,
+    pub symbol_directory_provider: String,
+    pub symbol_directory_refresh_interval_secs: Duration,
 }
 
 impl AppConfig {
@@ -48,6 +51,22 @@ impl AppConfig {
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or_else(|| Duration::from_secs(60 * 60)),
+            price_refresh_ttl_secs: env::var("PRICE_REFRESH_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|seconds| *seconds > 0)
+                .map(Duration::from_secs)
+                .unwrap_or_else(|| Duration::from_secs(24 * 60 * 60)),
+            symbol_directory_provider: env::var("SYMBOL_DIRECTORY_PROVIDER")
+                .unwrap_or_else(|_| "public".to_string()),
+            symbol_directory_refresh_interval_secs: env::var(
+                "SYMBOL_DIRECTORY_REFRESH_INTERVAL_SECS",
+            )
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(24 * 60 * 60)),
         }
     }
 }

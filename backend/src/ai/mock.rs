@@ -187,6 +187,7 @@ impl AiProvider for MockAiProvider {
                 market: Some("US".to_string()),
                 sector: None,
                 imported_market_value: Some("2450.00".to_string()),
+                last_price: Some("204.1667".to_string()),
                 notes: Some("Recognized from mock image provider.".to_string()),
                 confidence: "high".to_string(),
                 warnings: Vec::new(),

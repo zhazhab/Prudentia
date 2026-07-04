@@ -177,6 +177,7 @@ async fn portfolio_import_commit_computes_summary() {
 
     let result = portfolio::commit_import(
         &pool,
+        Arc::new(MockMarketDataProvider),
         PortfolioImportCommitRequest {
             file_name: "positions.csv".to_string(),
             content: sample_import_content(),
@@ -207,6 +208,7 @@ async fn failed_price_refresh_marks_stale_and_keeps_value() {
 
     portfolio::commit_import(
         &pool,
+        Arc::new(MockMarketDataProvider),
         PortfolioImportCommitRequest {
             file_name: "positions.csv".to_string(),
             content: sample_import_content(),
@@ -226,6 +228,232 @@ async fn failed_price_refresh_marks_stale_and_keeps_value() {
     assert_eq!(result.failed, 2);
     assert_eq!(before.total_market_value, after.total_market_value);
     assert_eq!(after.price_stale_count, 2);
+}
+
+#[tokio::test]
+async fn mock_price_refresh_keeps_imported_values() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+
+    portfolio::commit_import(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: sample_import_content(),
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let before = portfolio::summary(&pool).await.expect("summary before");
+    let result = portfolio::refresh_prices(&pool, Arc::new(MockMarketDataProvider))
+        .await
+        .expect("refresh");
+    let after = portfolio::summary(&pool).await.expect("summary after");
+
+    assert_eq!(result.failed, 2);
+    assert_eq!(before.total_market_value, after.total_market_value);
+    assert_eq!(after.price_stale_count, 2);
+}
+
+#[tokio::test]
+async fn portfolio_performance_uses_snapshots_and_benchmark_proxies() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+
+    portfolio::commit_import(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: sample_import_content(),
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let performance = portfolio::portfolio_performance(
+        &pool,
+        portfolio::PortfolioPerformanceQuery {
+            period: Some("since_inception".to_string()),
+        },
+    )
+    .await
+    .expect("performance");
+
+    assert_eq!(performance.period, "since_inception");
+    assert_eq!(performance.series.len(), 1);
+    assert_eq!(performance.portfolio.profit_loss_base, Some(0.0));
+    assert_eq!(performance.portfolio.annualized_return_pct, Some(0.0));
+    assert_eq!(performance.series[0].annualized_return_pct, Some(0.0));
+    assert_eq!(performance.benchmarks.len(), 3);
+    assert!(performance
+        .benchmarks
+        .iter()
+        .all(|benchmark| benchmark.available));
+    assert!(performance
+        .benchmarks
+        .iter()
+        .all(|benchmark| benchmark.annualized_return_pct == Some(0.0)));
+}
+
+#[tokio::test]
+async fn portfolio_performance_benchmark_failure_does_not_block_snapshot() {
+    let pool = test_pool().await;
+    let content = [
+        "symbol,name,quantity,average cost,currency,sector,market value",
+        "600519.SS,Kweichow Moutai,1,1500,CNY,Consumer,1600",
+    ]
+    .join("\n");
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: content.clone(),
+        content_encoding: None,
+    })
+    .expect("preview");
+
+    portfolio::commit_import(
+        &pool,
+        Arc::new(FailingProvider),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content,
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let performance = portfolio::portfolio_performance(
+        &pool,
+        portfolio::PortfolioPerformanceQuery {
+            period: Some("since_inception".to_string()),
+        },
+    )
+    .await
+    .expect("performance");
+
+    assert_eq!(performance.series.len(), 1);
+    assert!(performance
+        .benchmarks
+        .iter()
+        .all(|benchmark| !benchmark.available && benchmark.stale));
+}
+
+#[tokio::test]
+async fn portfolio_price_refresh_daily_ttl_skips_when_fresh() {
+    let pool = test_pool().await;
+    let provider = Arc::new(CountingFxProvider::new());
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+
+    portfolio::commit_import(
+        &pool,
+        provider.clone(),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: sample_import_content(),
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let first = portfolio::refresh_prices_if_due(
+        &pool,
+        provider.clone(),
+        std::time::Duration::from_secs(24 * 60 * 60),
+    )
+    .await
+    .expect("first refresh");
+    assert!(first.is_some());
+    let quote_calls_after_first = provider.quote_calls.load(Ordering::SeqCst);
+
+    let second = portfolio::refresh_prices_if_due(
+        &pool,
+        provider.clone(),
+        std::time::Duration::from_secs(24 * 60 * 60),
+    )
+    .await
+    .expect("second refresh");
+
+    assert!(second.is_none());
+    assert_eq!(
+        provider.quote_calls.load(Ordering::SeqCst),
+        quote_calls_after_first
+    );
+}
+
+#[tokio::test]
+async fn mock_price_refresh_repairs_positions_with_embedded_current_price() {
+    let pool = test_pool().await;
+    let preview = portfolio::draft_from_import(PortfolioImportDraftRequest {
+        file_name: "positions.csv".to_string(),
+        content: [
+            "symbol,name,quantity,average cost,currency,market,market value,notes",
+            "0700.HK,Tencent,900,489.877,HKD,HK,335646.34,current_price=430.200",
+        ]
+        .join("\n"),
+        content_encoding: None,
+        mapping: portfolio::PortfolioImportMapping {
+            symbol: "symbol".to_string(),
+            name: "name".to_string(),
+            quantity: "quantity".to_string(),
+            average_cost: "average cost".to_string(),
+            currency: "currency".to_string(),
+            market: Some("market".to_string()),
+            imported_market_value: Some("market value".to_string()),
+            notes: Some("notes".to_string()),
+            ..Default::default()
+        },
+    })
+    .expect("draft");
+
+    portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioDraftCommitRequest {
+            rows: preview.draft_rows,
+        },
+    )
+    .await
+    .expect("commit");
+    sqlx::query(
+        "UPDATE portfolio_positions SET last_price = 62.1, market_value = 74520, price_stale = 0 WHERE symbol = '0700.HK'",
+    )
+    .execute(&pool)
+    .await
+    .expect("corrupt position");
+
+    portfolio::refresh_prices(&pool, Arc::new(MockMarketDataProvider))
+        .await
+        .expect("refresh");
+
+    let positions = portfolio::list_positions(&pool).await.expect("positions");
+    assert_eq!(positions[0].last_price, Some(430.2));
+    assert_eq!(positions[0].market_value, 387180.0);
+    assert!(positions[0].price_stale);
 }
 
 #[tokio::test]
@@ -871,7 +1099,7 @@ async fn portfolio_draft_commit_blocks_invalid_rows_but_allows_low_confidence_ro
 }
 
 #[tokio::test]
-async fn portfolio_draft_commit_rejects_duplicate_symbols() {
+async fn portfolio_draft_commit_merges_duplicate_symbols() {
     let pool = test_pool().await;
     let preview = portfolio::preview(PortfolioImportPreviewRequest {
         file_name: "positions.csv".to_string(),
@@ -882,7 +1110,7 @@ async fn portfolio_draft_commit_rejects_duplicate_symbols() {
     let mut duplicate = preview.draft_rows[0].clone();
     duplicate.account = Some("Second account".to_string());
 
-    let error = portfolio::commit_draft_rows(
+    let result = portfolio::commit_draft_rows(
         &pool,
         Arc::new(MockMarketDataProvider),
         PortfolioDraftCommitRequest {
@@ -890,9 +1118,18 @@ async fn portfolio_draft_commit_rejects_duplicate_symbols() {
         },
     )
     .await
-    .expect_err("duplicate symbols must fail");
+    .expect("duplicate symbols merge");
 
-    assert!(format!("{error:?}").contains("duplicate symbol"));
+    assert_eq!(result.imported_count, 1);
+    assert_eq!(result.positions.len(), 1);
+    assert_eq!(result.positions[0].symbol, "AAPL");
+    assert_eq!(result.positions[0].quantity, 4.0);
+    assert_eq!(result.positions[0].average_cost, 100.0);
+    assert_eq!(result.positions[0].market_value, 500.0);
+    assert_eq!(
+        result.positions[0].account.as_deref(),
+        Some("Second account")
+    );
 }
 
 #[tokio::test]
@@ -1089,6 +1326,7 @@ async fn profile_accumulates_from_memos_decisions_and_positions() {
     .expect("preview");
     portfolio::commit_import(
         &pool,
+        Arc::new(MockMarketDataProvider),
         PortfolioImportCommitRequest {
             file_name: "positions.csv".to_string(),
             content: sample_import_content(),
@@ -1438,6 +1676,7 @@ async fn research_portfolio_review_source_content_tracks_holdings_without_memos(
     .expect("preview");
     portfolio::commit_import(
         &pool,
+        Arc::new(MockMarketDataProvider),
         PortfolioImportCommitRequest {
             file_name: "positions.csv".to_string(),
             content: [

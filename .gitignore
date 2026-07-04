@@ -33,7 +33,12 @@ npm-debug.log*
 .env
 *.sqlite
 *.sqlite3
-data/
+data/*
+!data/symbol-directory/
+data/symbol-directory/*
+!data/symbol-directory/public/
+data/symbol-directory/public/*
+!data/symbol-directory/public/symbols.json
 
 # Local planning and process docs
 docs/superpowers/
