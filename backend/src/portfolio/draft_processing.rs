@@ -285,7 +285,11 @@ fn position_from_draft_row(row: &PortfolioDraftRow) -> AppResult<PortfolioPositi
         notes: row.notes.clone(),
         last_price,
         market_value,
+        market_value_base: market_value,
         unrealized_pnl: market_value - cost_basis,
+        unrealized_pnl_pct: ratio_option(market_value - cost_basis, cost_basis),
+        period_profit_loss_base: None,
+        period_return_pct: None,
         weight: 0.0,
         price_updated_at: None,
         price_stale: true,
@@ -329,7 +333,11 @@ fn position_from_row(
         notes: optional_cell(headers, row, mapping.notes.as_deref()),
         last_price,
         market_value,
+        market_value_base: market_value,
         unrealized_pnl: market_value - cost_basis,
+        unrealized_pnl_pct: ratio_option(market_value - cost_basis, cost_basis),
+        period_profit_loss_base: None,
+        period_return_pct: None,
         weight: 0.0,
         price_updated_at: None,
         price_stale: true,
@@ -458,7 +466,14 @@ fn position_from_db_row(row: sqlx::sqlite::SqliteRow) -> AppResult<PortfolioPosi
         notes: row.try_get("notes")?,
         last_price: row.try_get("last_price")?,
         market_value: row.try_get("market_value")?,
+        market_value_base: row.try_get("market_value")?,
         unrealized_pnl: row.try_get("unrealized_pnl")?,
+        unrealized_pnl_pct: ratio_option(
+            row.try_get("unrealized_pnl")?,
+            row.try_get::<f64, _>("quantity")? * row.try_get::<f64, _>("average_cost")?,
+        ),
+        period_profit_loss_base: None,
+        period_return_pct: None,
         weight: row.try_get("weight")?,
         price_updated_at: row.try_get("price_updated_at")?,
         price_stale: row.try_get::<i64, _>("price_stale")? != 0,
@@ -471,6 +486,14 @@ fn ratio(value: f64, denominator: f64) -> f64 {
         0.0
     } else {
         value / denominator
+    }
+}
+
+fn ratio_option(value: f64, denominator: f64) -> Option<f64> {
+    if denominator.abs() < f64::EPSILON {
+        None
+    } else {
+        Some(value / denominator)
     }
 }
 

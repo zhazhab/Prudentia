@@ -22,6 +22,12 @@ struct PerformanceSnapshotRow {
 }
 
 #[derive(Debug, Clone)]
+struct PerformanceCashFlowRow {
+    occurred_at: String,
+    amount_base: f64,
+}
+
+#[derive(Debug, Clone)]
 struct BenchmarkSnapshotRow {
     captured_at: String,
     value_base: Option<f64>,
@@ -30,6 +36,7 @@ struct BenchmarkSnapshotRow {
 }
 
 const PRICE_REFRESH_STATE_KEY: &str = "portfolio_prices";
+const PRICE_REFRESH_SNAPSHOT_SOURCE: &str = "price_refresh";
 
 pub async fn record_portfolio_performance_snapshot(
     pool: &SqlitePool,
@@ -59,9 +66,40 @@ pub async fn record_portfolio_performance_snapshot(
     .execute(pool)
     .await?;
 
-    for benchmark in benchmark_definitions() {
-        record_benchmark_snapshot(pool, market_data.clone(), &snapshot_id, &captured_at, benchmark)
+    record_position_snapshots(pool, &snapshot_id, &captured_at, source).await?;
+    record_automatic_trade_cash_flow(
+        pool,
+        &captured_at,
+        source,
+        summary.total_market_value_base,
+    )
+    .await?;
+
+    if should_record_benchmark_snapshots(source) {
+        let benchmarks = benchmark_definitions();
+        let benchmark_symbols = benchmarks
+            .iter()
+            .map(|benchmark| benchmark.symbol.to_string())
+            .collect::<Vec<_>>();
+        let mut quote_results = market_data.quotes(&benchmark_symbols).await.into_iter();
+
+        for benchmark in benchmarks {
+            let quote_result = quote_results.next().unwrap_or_else(|| {
+                Err(crate::market_data::MarketDataError::Provider(format!(
+                    "{}: missing batch quote result",
+                    benchmark.symbol
+                )))
+            });
+            record_benchmark_snapshot(
+                pool,
+                market_data.clone(),
+                &snapshot_id,
+                &captured_at,
+                benchmark,
+                quote_result,
+            )
             .await?;
+        }
     }
 
     tracing::info!(
@@ -74,6 +112,10 @@ pub async fn record_portfolio_performance_snapshot(
     Ok(())
 }
 
+fn should_record_benchmark_snapshots(source: &str) -> bool {
+    source == PRICE_REFRESH_SNAPSHOT_SOURCE
+}
+
 pub async fn portfolio_performance(
     pool: &SqlitePool,
     query: PortfolioPerformanceQuery,
@@ -81,8 +123,9 @@ pub async fn portfolio_performance(
     let period = parse_performance_period(query.period.as_deref())?;
     let period_start = period_start_utc(period);
     let snapshots = load_performance_snapshots(pool, period_start.as_deref()).await?;
-    let portfolio = portfolio_metric(&snapshots);
-    let series = portfolio_series(&snapshots);
+    let cash_flows = load_performance_cash_flows(pool, period_start.as_deref()).await?;
+    let portfolio = portfolio_metric(&snapshots, &cash_flows);
+    let series = portfolio_series(&snapshots, &cash_flows);
     let benchmarks = load_benchmark_performance(pool, period, period_start.as_deref()).await?;
     let first_snapshot = snapshots.first();
     let last_snapshot = snapshots.last();
@@ -129,6 +172,7 @@ async fn record_benchmark_snapshot(
     snapshot_id: &str,
     captured_at: &str,
     benchmark: BenchmarkDefinition,
+    quote_result: Result<crate::market_data::MarketQuote, crate::market_data::MarketDataError>,
 ) -> AppResult<()> {
     let currency = benchmark.currency.to_string();
     let mut price = None;
@@ -138,23 +182,36 @@ async fn record_benchmark_snapshot(
     let stale;
     let error;
 
-    match market_data.quote(benchmark.symbol).await {
+    match quote_result {
         Ok(quote) => {
-            price = Some(quote.price);
-            source = Some(quote.source);
+            if is_mock_market_data_source(&quote.source) {
+                tracing::warn!(
+                    benchmark_key = benchmark.key,
+                    symbol = benchmark.symbol,
+                    "portfolio benchmark mock quote ignored"
+                );
+                stale = true;
+                error = Some(format!(
+                    "{}: mock quote provider does not update benchmark prices",
+                    benchmark.symbol
+                ));
+            } else {
+                price = Some(quote.price);
+                source = Some(quote.source);
 
-            match benchmark_fx_rate(pool, market_data, &currency).await? {
-                Some((rate, is_stale, fx_error)) => {
-                    fx_rate = Some(rate);
-                    value_base = Some(quote.price * rate);
-                    stale = is_stale;
-                    error = fx_error;
+                match benchmark_fx_rate(pool, market_data, &currency).await? {
+                    Some((rate, is_stale, fx_error)) => {
+                        fx_rate = Some(rate);
+                        value_base = Some(quote.price * rate);
+                        stale = is_stale;
+                        error = fx_error;
+                    }
+                    None => {
+                        stale = true;
+                        error = Some(format!("missing FX rate for {currency}/{BASE_CURRENCY}"));
+                    }
                 }
-                None => {
-                    stale = true;
-                    error = Some(format!("missing FX rate for {currency}/{BASE_CURRENCY}"));
-                }
-            }
+            };
         }
         Err(quote_error) => {
             tracing::warn!(
@@ -300,6 +357,44 @@ async fn load_performance_snapshots(
         .collect()
 }
 
+async fn load_performance_cash_flows(
+    pool: &SqlitePool,
+    period_start: Option<&str>,
+) -> AppResult<Vec<PerformanceCashFlowRow>> {
+    let rows = if let Some(period_start) = period_start {
+        sqlx::query(
+            r#"
+            SELECT occurred_at, amount_base
+            FROM portfolio_cash_flows
+            WHERE occurred_at >= ?
+            ORDER BY occurred_at ASC, id ASC
+            "#,
+        )
+        .bind(period_start)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT occurred_at, amount_base
+            FROM portfolio_cash_flows
+            ORDER BY occurred_at ASC, id ASC
+            "#,
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PerformanceCashFlowRow {
+                occurred_at: row.try_get("occurred_at")?,
+                amount_base: row.try_get("amount_base")?,
+            })
+        })
+        .collect()
+}
+
 async fn load_benchmark_performance(
     pool: &SqlitePool,
     period: PerformancePeriod,
@@ -307,7 +402,8 @@ async fn load_benchmark_performance(
 ) -> AppResult<Vec<BenchmarkPerformance>> {
     let mut benchmarks = Vec::new();
     for benchmark in benchmark_definitions() {
-        let rows = load_benchmark_snapshots(pool, benchmark.key, period_start).await?;
+        let rows =
+            load_benchmark_snapshots(pool, benchmark.key, benchmark.symbol, period_start).await?;
         let start = rows
             .iter()
             .find_map(|row| row.value_base.map(|value| (row.captured_at.clone(), value)));
@@ -372,42 +468,60 @@ async fn load_benchmark_performance(
 async fn load_benchmark_snapshots(
     pool: &SqlitePool,
     benchmark_key: &str,
+    symbol: &str,
     period_start: Option<&str>,
 ) -> AppResult<Vec<BenchmarkSnapshotRow>> {
     let rows = if let Some(period_start) = period_start {
         sqlx::query(
             r#"
-            SELECT captured_at, value_base, stale, error
+            SELECT captured_at, value_base, source, stale, error
             FROM portfolio_benchmark_snapshots
-            WHERE benchmark_key = ? AND captured_at >= ?
+            WHERE benchmark_key = ? AND symbol = ? AND captured_at >= ?
             ORDER BY captured_at ASC, id ASC
             "#,
         )
         .bind(benchmark_key)
+        .bind(symbol)
         .bind(period_start)
         .fetch_all(pool)
         .await?
     } else {
         sqlx::query(
             r#"
-            SELECT captured_at, value_base, stale, error
+            SELECT captured_at, value_base, source, stale, error
             FROM portfolio_benchmark_snapshots
-            WHERE benchmark_key = ?
+            WHERE benchmark_key = ? AND symbol = ?
             ORDER BY captured_at ASC, id ASC
             "#,
         )
         .bind(benchmark_key)
+        .bind(symbol)
         .fetch_all(pool)
         .await?
     };
 
     rows.into_iter()
         .map(|row| {
+            let source = row.try_get::<Option<String>, _>("source")?;
+            let is_mock = source
+                .as_deref()
+                .is_some_and(is_mock_market_data_source);
+            let error = row.try_get::<Option<String>, _>("error")?;
             Ok(BenchmarkSnapshotRow {
                 captured_at: row.try_get("captured_at")?,
-                value_base: row.try_get("value_base")?,
-                stale: row.try_get::<i64, _>("stale")? != 0,
-                error: row.try_get("error")?,
+                value_base: if is_mock {
+                    None
+                } else {
+                    row.try_get("value_base")?
+                },
+                stale: row.try_get::<i64, _>("stale")? != 0 || is_mock,
+                error: if is_mock {
+                    Some(error.unwrap_or_else(|| {
+                        "mock quote provider does not update benchmark prices".to_string()
+                    }))
+                } else {
+                    error
+                },
             })
         })
         .collect()
@@ -468,21 +582,29 @@ async fn record_price_refresh_attempt(
     Ok(())
 }
 
-fn portfolio_metric(snapshots: &[PerformanceSnapshotRow]) -> PortfolioPerformanceMetric {
+fn portfolio_metric(
+    snapshots: &[PerformanceSnapshotRow],
+    cash_flows: &[PerformanceCashFlowRow],
+) -> PortfolioPerformanceMetric {
     let start_snapshot = snapshots.first();
     let end_snapshot = snapshots.last();
     let start = start_snapshot.map(|snapshot| snapshot.total_market_value_base);
     let end = end_snapshot.map(|snapshot| snapshot.total_market_value_base);
-    let profit_loss = start.zip(end).map(|(start, end)| end - start);
-    let return_pct = start
+    let net_cash_flow = start_snapshot
+        .zip(end_snapshot)
+        .map(|(start, end)| cash_flow_sum_between(cash_flows, &start.captured_at, &end.captured_at))
+        .unwrap_or(0.0);
+    let profit_loss = start.zip(end).map(|(start, end)| end - start - net_cash_flow);
+    let simple_return_pct = start
         .zip(end)
         .and_then(|(start, end)| percentage_return(start, end));
+    let return_pct = time_weighted_return(snapshots, cash_flows);
     let annualized_return_pct = start_snapshot
         .zip(end_snapshot)
-        .and_then(|(start_snapshot, end_snapshot)| {
-            annualized_return(
-                start_snapshot.total_market_value_base,
-                end_snapshot.total_market_value_base,
+        .zip(return_pct)
+        .and_then(|((start_snapshot, end_snapshot), return_pct)| {
+            annualized_return_from_period_return(
+                return_pct,
                 &start_snapshot.captured_at,
                 &end_snapshot.captured_at,
             )
@@ -492,33 +614,79 @@ fn portfolio_metric(snapshots: &[PerformanceSnapshotRow]) -> PortfolioPerformanc
         start_value_base: start,
         end_value_base: end,
         profit_loss_base: profit_loss,
+        net_cash_flow_base: net_cash_flow,
         return_pct,
+        simple_return_pct,
         annualized_return_pct,
+        return_method: "time_weighted".to_string(),
     }
 }
 
-fn portfolio_series(snapshots: &[PerformanceSnapshotRow]) -> Vec<PortfolioPerformancePoint> {
-    let start_snapshot = snapshots.first();
+fn portfolio_series(
+    snapshots: &[PerformanceSnapshotRow],
+    cash_flows: &[PerformanceCashFlowRow],
+) -> Vec<PortfolioPerformancePoint> {
+    let Some(start_snapshot) = snapshots.first() else {
+        return Vec::new();
+    };
+
+    let mut previous_snapshot = start_snapshot;
+    let mut cumulative_factor = Some(1.0);
+    let mut cumulative_cash_flow = 0.0;
+
     snapshots
         .iter()
-        .map(|snapshot| PortfolioPerformancePoint {
-            captured_at: snapshot.captured_at.clone(),
-            value_base: snapshot.total_market_value_base,
-            profit_loss_base: start_snapshot
-                .map(|start| snapshot.total_market_value_base - start.total_market_value_base),
-            return_pct: start_snapshot.and_then(|start| {
-                percentage_return(start.total_market_value_base, snapshot.total_market_value_base)
-            }),
-            annualized_return_pct: start_snapshot.and_then(|start| {
-                annualized_return(
-                    start.total_market_value_base,
+        .enumerate()
+        .map(|(index, snapshot)| {
+            if index > 0 {
+                let interval_flow =
+                    cash_flow_sum_between(cash_flows, &previous_snapshot.captured_at, &snapshot.captured_at);
+                cumulative_cash_flow += interval_flow;
+                cumulative_factor = cumulative_factor.and_then(|factor| {
+                    period_return_factor(
+                        previous_snapshot.total_market_value_base,
+                        snapshot.total_market_value_base,
+                        interval_flow,
+                    )
+                    .map(|period_factor| factor * period_factor)
+                });
+                previous_snapshot = snapshot;
+            }
+
+            let return_pct = cumulative_factor.map(|factor| factor - 1.0);
+            PortfolioPerformancePoint {
+                captured_at: snapshot.captured_at.clone(),
+                value_base: snapshot.total_market_value_base,
+                profit_loss_base: Some(
+                    snapshot.total_market_value_base
+                        - start_snapshot.total_market_value_base
+                        - cumulative_cash_flow,
+                ),
+                net_cash_flow_base: cumulative_cash_flow,
+                return_pct,
+                simple_return_pct: percentage_return(
+                    start_snapshot.total_market_value_base,
                     snapshot.total_market_value_base,
-                    &start.captured_at,
-                    &snapshot.captured_at,
-                )
-            }),
+                ),
+                annualized_return_pct: return_pct.and_then(|value| {
+                    annualized_return_from_period_return(
+                        value,
+                        &start_snapshot.captured_at,
+                        &snapshot.captured_at,
+                    )
+                }),
+            }
         })
         .collect()
+}
+
+fn time_weighted_return(
+    snapshots: &[PerformanceSnapshotRow],
+    cash_flows: &[PerformanceCashFlowRow],
+) -> Option<f64> {
+    portfolio_series(snapshots, cash_flows)
+        .last()
+        .and_then(|point| point.return_pct)
 }
 
 fn percentage_return(start: f64, end: f64) -> Option<f64> {
@@ -530,24 +698,7 @@ fn percentage_return(start: f64, end: f64) -> Option<f64> {
 
 fn annualized_return(start: f64, end: f64, start_at: &str, end_at: &str) -> Option<f64> {
     let return_pct = percentage_return(start, end)?;
-    if return_pct.abs() < f64::EPSILON {
-        return Some(0.0);
-    }
-
-    let start_at = chrono::DateTime::parse_from_rfc3339(start_at).ok()?;
-    let end_at = chrono::DateTime::parse_from_rfc3339(end_at).ok()?;
-    let elapsed_seconds = end_at.signed_duration_since(start_at).num_seconds();
-    if elapsed_seconds <= 0 {
-        return None;
-    }
-
-    let elapsed_days = elapsed_seconds as f64 / 86_400.0;
-    let ratio = end / start;
-    if ratio <= 0.0 {
-        return None;
-    }
-
-    Some(ratio.powf(365.25 / elapsed_days) - 1.0)
+    annualized_return_from_period_return(return_pct, start_at, end_at)
 }
 
 fn is_partial_period(
@@ -619,8 +770,8 @@ fn benchmark_definitions() -> [BenchmarkDefinition; 3] {
         },
         BenchmarkDefinition {
             key: "sse",
-            label: "SSE Composite ETF proxy",
-            symbol: "510210.SS",
+            label: "SSE Composite",
+            symbol: "000001.SS",
             currency: "CNY",
         },
     ]

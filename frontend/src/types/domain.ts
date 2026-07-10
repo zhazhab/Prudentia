@@ -35,7 +35,11 @@ export interface PortfolioPosition {
   notes?: string | null;
   last_price?: number | null;
   market_value: number;
+  market_value_base: number;
   unrealized_pnl: number;
+  unrealized_pnl_pct?: number | null;
+  period_profit_loss_base?: number | null;
+  period_return_pct?: number | null;
   weight: number;
   price_updated_at?: string | null;
   price_stale: boolean;
@@ -172,15 +176,20 @@ export interface PortfolioPerformanceMetric {
   start_value_base?: number | null;
   end_value_base?: number | null;
   profit_loss_base?: number | null;
+  net_cash_flow_base: number;
   return_pct?: number | null;
+  simple_return_pct?: number | null;
   annualized_return_pct?: number | null;
+  return_method: "time_weighted" | string;
 }
 
 export interface PortfolioPerformancePoint {
   captured_at: string;
   value_base: number;
   profit_loss_base?: number | null;
+  net_cash_flow_base: number;
   return_pct?: number | null;
+  simple_return_pct?: number | null;
   annualized_return_pct?: number | null;
 }
 

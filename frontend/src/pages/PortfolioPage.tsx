@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Check,
   Edit3,
   FileUp,
   Plus,
+  RefreshCw,
   Save,
   SearchCheck,
   SlidersHorizontal,
@@ -40,28 +44,36 @@ import type {
 import {
   canCommitDraftRows,
   currencyOptionsForValue,
+  defaultPositionSortRule,
   draftEditableDisplayFields,
   draftRowsForCommit,
   emptyPortfolioDraftRow,
   ensureDraftRowClientIds,
   formatBaseMoney,
   formatMoney,
+  formatReturnPercent,
   marketOptionsForValue,
   mergeDuplicateDraftRowsBySymbol,
+  nextPositionSortRule,
+  normalizePositionSortRule,
   performanceChartRows,
   performanceChartYAxisDomain,
   percent,
+  positionTableSortableFields,
   positionTableDisplayFields,
   portfolioDashboardPanelIds,
   portfolioImportFileKind,
   portfolioIssueLabels,
   positionEditDraft,
   positionUpdatePayload,
+  sortPositions,
   updateDraftRowField,
   type BenchmarkComparisonMetric,
   type PortfolioDraftEditableField,
-  type PositionTableDisplayField,
-  type PositionEditDraft
+  type PositionEditDraft,
+  type PositionSortField,
+  type PositionSortRule,
+  type PositionTableDisplayField
 } from "./portfolioRules";
 
 type DraftTableRow = PortfolioDraftRow & {
@@ -79,14 +91,45 @@ type ImageImportTaskState = PortfolioImageImportTask & {
 type FileImportMode = "append" | "replace";
 type PerformanceView = "amount" | "percent";
 
+const positionSortStorageKey = "prudentia.portfolio.positionSort";
+
+function loadPositionSortRule(): PositionSortRule {
+  if (typeof window === "undefined") {
+    return defaultPositionSortRule;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(positionSortStorageKey);
+    return normalizePositionSortRule(rawValue ? JSON.parse(rawValue) : null);
+  } catch {
+    return defaultPositionSortRule;
+  }
+}
+
+function savePositionSortRule(sortRule: PositionSortRule) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(positionSortStorageKey, JSON.stringify(normalizePositionSortRule(sortRule)));
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
 export function PortfolioPage() {
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
-  const positions = useQuery({ queryKey: ["positions"], queryFn: api.positions });
   const summary = useQuery({ queryKey: ["portfolio-summary"], queryFn: api.portfolioSummary });
   const [performancePeriod, setPerformancePeriod] = useState<PortfolioPerformancePeriod>("month");
   const [performanceView, setPerformanceView] = useState<PerformanceView>("percent");
   const [benchmarkMetric, setBenchmarkMetric] = useState<BenchmarkComparisonMetric>("cumulative");
+  const [positionSort, setPositionSort] = useState<PositionSortRule>(loadPositionSortRule);
+  const positions = useQuery({
+    queryKey: ["positions", performancePeriod],
+    queryFn: () => api.positions(performancePeriod)
+  });
   const performance = useQuery({
     queryKey: ["portfolio-performance", performancePeriod],
     queryFn: () => api.portfolioPerformance(performancePeriod)
@@ -120,6 +163,8 @@ export function PortfolioPage() {
   const performanceAmount = performanceMetric?.profit_loss_base ?? null;
   const performanceReturn = performanceMetric?.return_pct ?? null;
   const performanceAnnualized = performanceMetric?.annualized_return_pct ?? null;
+  const performanceNetCashFlow = performanceMetric?.net_cash_flow_base ?? 0;
+  const performanceSimpleReturn = performanceMetric?.simple_return_pct ?? null;
   const performanceValue =
     performanceView === "amount"
       ? performanceAmount === null
@@ -128,16 +173,26 @@ export function PortfolioPage() {
       : formatOptionalPercent(performanceReturn);
   const performanceDetail =
     performanceView === "amount"
-      ? t("portfolio.performancePercentDetail", { value: formatOptionalPercent(performanceReturn) })
-      : t("portfolio.performanceAmountDetail", {
+      ? t("portfolio.performanceTwrAmountDetail", {
+          value: formatOptionalPercent(performanceReturn),
+          flow: formatSignedMoney(performanceNetCashFlow, performance.data?.base_currency ?? "CNY"),
+          simple: formatOptionalPercent(performanceSimpleReturn)
+        })
+      : t("portfolio.performanceTwrPercentDetail", {
           value:
             performanceAmount === null
               ? "—"
-              : formatMoney(performanceAmount, performance.data?.base_currency ?? "CNY")
+              : formatMoney(performanceAmount, performance.data?.base_currency ?? "CNY"),
+          flow: formatSignedMoney(performanceNetCashFlow, performance.data?.base_currency ?? "CNY"),
+          simple: formatOptionalPercent(performanceSimpleReturn)
         });
   const checkedDraftRows = useMemo(
     () => mergeDuplicateDraftRowsBySymbol(draftRows) as DraftTableRow[],
     [draftRows]
+  );
+  const sortedPositions = useMemo(
+    () => sortPositions(positions.data ?? [], positionSort),
+    [positions.data, positionSort]
   );
   const draftHasRows = draftRows.length > 0;
   const draftCanCommit = canCommitDraftRows(checkedDraftRows);
@@ -151,6 +206,10 @@ export function PortfolioPage() {
       cancelRunningImageTasks();
     };
   }, [aiWs]);
+
+  useEffect(() => {
+    savePositionSortRule(positionSort);
+  }, [positionSort]);
 
   const previewPortfolioImport = useMutation({
     mutationFn: api.previewPortfolioImport,
@@ -226,6 +285,11 @@ export function PortfolioPage() {
     onSuccess: () => invalidatePortfolio(queryClient)
   });
 
+  const refreshPrices = useMutation({
+    mutationFn: api.refreshPortfolioPrices,
+    onSuccess: () => invalidatePortfolio(queryClient)
+  });
+
   const actionError =
     draftError ??
     previewPortfolioImport.error?.message ??
@@ -233,6 +297,7 @@ export function PortfolioPage() {
     resolveDraftSymbols.error?.message ??
     updatePosition.error?.message ??
     deletePosition.error?.message ??
+    refreshPrices.error?.message ??
     null;
 
   async function handleFile(file: File | null) {
@@ -588,7 +653,7 @@ export function PortfolioPage() {
           detail={t("portfolio.annualizedReturnDetail")}
           tone={performanceAnnualized === null ? "neutral" : performanceAnnualized >= 0 ? "positive" : "warning"}
         />
-        <StatCard label={t("portfolio.cnyTotal")} value={summary.data ? formatBaseMoney(summary.data) : "CN¥0.00"} />
+        <StatCard label={t("portfolio.cnyTotal")} value={summary.data ? formatBaseMoney(summary.data) : "CNY 0.00"} />
         <StatCard
           label={t("portfolio.cnyPl")}
           value={formatMoney(summary.data?.total_unrealized_pnl_base ?? 0, "CNY")}
@@ -768,20 +833,46 @@ export function PortfolioPage() {
         <section className="panel">
           <div className="panel-head">
             <h3>{t("portfolio.positions")}</h3>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={t("portfolio.refreshPrices")}
+              title={t("portfolio.refreshPrices")}
+              disabled={refreshPrices.isPending}
+              onClick={() => refreshPrices.mutate()}
+            >
+              <RefreshCw size={18} />
+            </button>
           </div>
-          {(positions.data ?? []).length ? (
+          {sortedPositions.length ? (
             <div className="data-table-wrap">
               <table>
                 <thead>
                   <tr>
-                    {positionTableDisplayFields.map((field) => (
-                      <th key={field}>{t(positionTableFieldLabels[field])}</th>
-                    ))}
+                    {positionTableDisplayFields.map((field) => {
+                      const label = t(positionTableFieldLabels[field]);
+                      return (
+                        <th key={field} aria-sort={positionHeaderAriaSort(positionSort, field)}>
+                          {isPositionSortableField(field) ? (
+                            <button
+                              className="table-sort-button"
+                              type="button"
+                              onClick={() => setPositionSort((current) => nextPositionSortRule(current, field))}
+                            >
+                              <span>{label}</span>
+                              {positionSortIcon(positionSort, field)}
+                            </button>
+                          ) : (
+                            label
+                          )}
+                        </th>
+                      );
+                    })}
                     <th>{t("portfolio.actions")}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(positions.data ?? []).map((position) => (
+                  {sortedPositions.map((position) => (
                     <tr key={position.symbol}>
                       {positionTableDisplayFields.map((field) => (
                         <td key={field} className={positionTableCellClass(position, field)}>
@@ -1045,16 +1136,51 @@ function positionTableCell(position: PortfolioPosition, field: PositionTableDisp
       return formatMoney(position.market_value, position.currency);
     case "unrealized_pnl":
       return formatMoney(position.unrealized_pnl, position.currency);
+    case "unrealized_pnl_pct":
+      return formatOptionalPercent(position.unrealized_pnl_pct);
+    case "period_return_pct":
+      return formatOptionalPercent(position.period_return_pct);
     case "weight":
       return percent(position.weight);
   }
 }
 
-function positionTableCellClass(position: PortfolioPosition, field: PositionTableDisplayField) {
-  if (field !== "unrealized_pnl") {
+function isPositionSortableField(field: PositionTableDisplayField): field is PositionSortField {
+  return positionTableSortableFields.includes(field as PositionSortField);
+}
+
+function positionHeaderAriaSort(
+  sortRule: PositionSortRule,
+  field: PositionTableDisplayField
+): "ascending" | "descending" | undefined {
+  if (!isPositionSortableField(field) || sortRule.field !== field) {
     return undefined;
   }
-  return position.unrealized_pnl >= 0 ? "positive-text" : "warning-text";
+  return sortRule.direction === "desc" ? "descending" : "ascending";
+}
+
+function positionSortIcon(sortRule: PositionSortRule, field: PositionSortField) {
+  if (sortRule.field !== field) {
+    return <ArrowUpDown aria-hidden="true" size={13} />;
+  }
+  return sortRule.direction === "desc" ? (
+    <ArrowDown aria-hidden="true" size={13} />
+  ) : (
+    <ArrowUp aria-hidden="true" size={13} />
+  );
+}
+
+function positionTableCellClass(position: PortfolioPosition, field: PositionTableDisplayField) {
+  if (field === "unrealized_pnl" || field === "unrealized_pnl_pct") {
+    return position.unrealized_pnl >= 0 ? "positive-text" : "warning-text";
+  }
+  if (field === "period_return_pct") {
+    if (position.period_return_pct === null || position.period_return_pct === undefined) {
+      return undefined;
+    }
+    return position.period_return_pct >= 0 ? "positive-text" : "warning-text";
+  }
+  return undefined;
 }
 
 const emptyMapping: PortfolioImportMapping = {
@@ -1075,6 +1201,8 @@ const positionTableFieldLabels: Record<PositionTableDisplayField, TranslationKey
   average_cost: "portfolio.tableAvgCost",
   market_value: "portfolio.tableMarketValue",
   unrealized_pnl: "portfolio.tablePl",
+  unrealized_pnl_pct: "portfolio.tablePlPct",
+  period_return_pct: "portfolio.tablePeriodReturnPct",
   weight: "portfolio.tableWeight"
 };
 
@@ -1231,11 +1359,18 @@ function number(value: number) {
 }
 
 function formatOptionalPercent(value: number | null | undefined) {
-  return value === null || value === undefined ? "—" : percent(value);
+  return value === null || value === undefined ? "—" : formatReturnPercent(value);
+}
+
+function formatSignedMoney(value: number, currency: string) {
+  if (Math.abs(value) < Number.EPSILON) {
+    return formatMoney(0, currency);
+  }
+  return `${value > 0 ? "+" : ""}${formatMoney(value, currency)}`;
 }
 
 function formatPercentPoints(value: number | null | undefined) {
-  return value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)} pp`;
+  return value === null || value === undefined ? "—" : `${(value * 100).toFixed(2)} pp`;
 }
 
 function formatChartTick(value: number, metric: BenchmarkComparisonMetric) {

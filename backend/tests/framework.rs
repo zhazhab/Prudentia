@@ -47,6 +47,15 @@ async fn test_pool() -> SqlitePool {
 async fn decision_delta_migration_creates_timeline_indexes() {
     let pool = test_pool().await;
 
+    assert!(table_names(&pool)
+        .await
+        .contains(&"portfolio_position_snapshots".to_string()));
+    assert!(table_names(&pool)
+        .await
+        .contains(&"portfolio_cash_flows".to_string()));
+    assert!(index_names(&pool, "portfolio_cash_flows")
+        .await
+        .contains(&"idx_portfolio_cash_flows_occurred_at".to_string()));
     assert!(index_names(&pool, "decision_delta_legs")
         .await
         .contains(&"idx_decision_delta_legs_decision_kind".to_string()));
@@ -113,6 +122,16 @@ fn ai_ws_messages_round_trip_portfolio_image_import() {
     assert_eq!(serialized["type"], "progress");
     assert_eq!(serialized["request_id"], "req-1");
     assert_eq!(serialized["stage"], "recognizing_image");
+}
+
+async fn table_names(pool: &SqlitePool) -> Vec<String> {
+    let rows = sqlx::query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name ASC")
+        .fetch_all(pool)
+        .await
+        .expect("table names");
+    rows.into_iter()
+        .map(|row| row.try_get::<String, _>("name").expect("table name"))
+        .collect()
 }
 
 async fn index_names(pool: &SqlitePool, table: &str) -> Vec<String> {
@@ -265,6 +284,141 @@ async fn mock_price_refresh_keeps_imported_values() {
 }
 
 #[tokio::test]
+async fn price_refresh_matches_broker_position_pnl_formula() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+
+    portfolio::commit_import(
+        &pool,
+        Arc::new(StaticFxQuoteProvider {
+            price: 120.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: sample_import_content(),
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+
+    portfolio::refresh_prices(
+        &pool,
+        Arc::new(StaticFxQuoteProvider {
+            price: 120.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
+    )
+    .await
+    .expect("refresh prices");
+
+    let positions = portfolio::list_positions(&pool).await.expect("positions");
+    let apple = positions
+        .iter()
+        .find(|position| position.symbol == "AAPL")
+        .expect("AAPL position");
+    assert_eq!(apple.last_price, Some(120.0));
+    assert_eq!(apple.market_value, 240.0);
+    assert_eq!(apple.unrealized_pnl, 40.0);
+
+    let microsoft = positions
+        .iter()
+        .find(|position| position.symbol == "MSFT")
+        .expect("MSFT position");
+    assert_eq!(microsoft.last_price, Some(120.0));
+    assert_eq!(microsoft.market_value, 120.0);
+    assert_eq!(microsoft.unrealized_pnl, -80.0);
+
+    let summary = portfolio::summary_with_fx(
+        &pool,
+        Arc::new(StaticFxQuoteProvider {
+            price: 120.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
+    )
+    .await
+    .expect("summary");
+    assert_eq!(summary.total_market_value_base, (240.0 + 120.0) * 7.0);
+    assert_eq!(summary.total_cost_base, (2.0 * 100.0 + 1.0 * 200.0) * 7.0);
+    assert_eq!(summary.total_unrealized_pnl_base, (40.0 - 80.0) * 7.0);
+}
+
+#[tokio::test]
+async fn positions_expose_current_and_period_return_rates() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+
+    portfolio::commit_import(
+        &pool,
+        Arc::new(StaticFxQuoteProvider {
+            price: 100.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: sample_import_content(),
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+
+    portfolio::refresh_prices(
+        &pool,
+        Arc::new(StaticFxQuoteProvider {
+            price: 120.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
+    )
+    .await
+    .expect("refresh prices");
+
+    let positions = portfolio::list_positions_for_period(
+        &pool,
+        portfolio::PortfolioPositionsQuery {
+            period: Some("since_inception".to_string()),
+        },
+    )
+    .await
+    .expect("positions");
+    let apple = positions
+        .iter()
+        .find(|position| position.symbol == "AAPL")
+        .expect("AAPL position");
+    assert_eq!(apple.unrealized_pnl_pct, Some(0.2));
+    assert_eq!(apple.period_profit_loss_base, Some(-70.0));
+    assert_eq!(apple.period_return_pct, Some(-0.04));
+
+    let microsoft = positions
+        .iter()
+        .find(|position| position.symbol == "MSFT")
+        .expect("MSFT position");
+    assert_eq!(microsoft.unrealized_pnl_pct, Some(-0.4));
+    assert_eq!(microsoft.period_profit_loss_base, Some(-700.0));
+    assert!(
+        (microsoft.period_return_pct.expect("period return") - (-100.0 / 220.0)).abs() < 0.000001
+    );
+}
+
+#[tokio::test]
 async fn portfolio_performance_uses_snapshots_and_benchmark_proxies() {
     let pool = test_pool().await;
     let preview = portfolio::preview(PortfolioImportPreviewRequest {
@@ -276,7 +430,11 @@ async fn portfolio_performance_uses_snapshots_and_benchmark_proxies() {
 
     portfolio::commit_import(
         &pool,
-        Arc::new(MockMarketDataProvider),
+        Arc::new(StaticFxQuoteProvider {
+            price: 100.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
         PortfolioImportCommitRequest {
             file_name: "positions.csv".to_string(),
             content: sample_import_content(),
@@ -286,6 +444,18 @@ async fn portfolio_performance_uses_snapshots_and_benchmark_proxies() {
     )
     .await
     .expect("commit");
+
+    portfolio::record_portfolio_performance_snapshot(
+        &pool,
+        Arc::new(StaticFxQuoteProvider {
+            price: 100.0,
+            currency: "USD",
+            fx_rate: 7.0,
+        }),
+        "price_refresh",
+    )
+    .await
+    .expect("record price refresh snapshot");
 
     let performance = portfolio::portfolio_performance(
         &pool,
@@ -297,7 +467,7 @@ async fn portfolio_performance_uses_snapshots_and_benchmark_proxies() {
     .expect("performance");
 
     assert_eq!(performance.period, "since_inception");
-    assert_eq!(performance.series.len(), 1);
+    assert_eq!(performance.series.len(), 2);
     assert_eq!(performance.portfolio.profit_loss_base, Some(0.0));
     assert_eq!(performance.portfolio.annualized_return_pct, Some(0.0));
     assert_eq!(performance.series[0].annualized_return_pct, Some(0.0));
@@ -1273,6 +1443,40 @@ async fn portfolio_summary_uses_cny_base_totals_and_marks_stale_fx_fallback() {
         stale_summary.total_market_value_base,
         summary.total_market_value_base
     );
+}
+
+#[tokio::test]
+async fn portfolio_positions_sort_market_value_by_cny_base_value() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: [
+            "symbol,name,quantity,average cost,currency,market,market value",
+            "AAPL,Apple,1,100,USD,US,100",
+            "600519,Maotai,1,500,CNY,CN,500",
+        ]
+        .join("\n"),
+        content_encoding: None,
+    })
+    .expect("preview");
+    portfolio::commit_draft_rows(
+        &pool,
+        Arc::new(FxProvider { fail: false }),
+        PortfolioDraftCommitRequest {
+            rows: preview.draft_rows,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let positions = portfolio::list_positions(&pool).await.expect("positions");
+
+    assert_eq!(positions[0].symbol, "AAPL");
+    assert_eq!(positions[0].market_value, 100.0);
+    assert_eq!(positions[0].market_value_base, 700.0);
+    assert_eq!(positions[1].symbol, "600519");
+    assert_eq!(positions[1].market_value, 500.0);
+    assert_eq!(positions[1].market_value_base, 500.0);
 }
 
 #[tokio::test]
@@ -2299,7 +2503,11 @@ fn sample_position(symbol: &str) -> portfolio::PortfolioPosition {
         notes: None,
         last_price: Some(100.0),
         market_value: 100.0,
+        market_value_base: 100.0,
         unrealized_pnl: 0.0,
+        unrealized_pnl_pct: Some(0.0),
+        period_profit_loss_base: None,
+        period_return_pct: None,
         weight: 0.0,
         price_updated_at: None,
         price_stale: false,

@@ -1,10 +1,22 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{database, market_data::mock::MockMarketDataProvider};
+    use crate::{
+        database,
+        market_data::{
+            mock::MockMarketDataProvider, ExchangeRate, MarketDataError, MarketDataProvider,
+            MarketQuote,
+        },
+    };
     use async_trait::async_trait;
     use sqlx::sqlite::SqlitePoolOptions;
-    use std::{collections::VecDeque, sync::Mutex};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc as StdArc, Mutex,
+        },
+    };
 
     struct FixedSymbolResolver {
         symbol: Option<String>,
@@ -43,6 +55,53 @@ mod tests {
         }
     }
 
+    struct BatchOnlyMarketDataProvider {
+        batch_calls: StdArc<AtomicUsize>,
+        single_calls: StdArc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MarketDataProvider for BatchOnlyMarketDataProvider {
+        async fn quote(&self, symbol: &str) -> Result<MarketQuote, MarketDataError> {
+            self.single_calls.fetch_add(1, Ordering::SeqCst);
+            Err(MarketDataError::Provider(format!(
+                "{symbol}: single quote should not be used during portfolio refresh"
+            )))
+        }
+
+        async fn quotes(&self, symbols: &[String]) -> Vec<Result<MarketQuote, MarketDataError>> {
+            self.batch_calls.fetch_add(1, Ordering::SeqCst);
+            symbols
+                .iter()
+                .enumerate()
+                .map(|(index, symbol)| {
+                    Ok(MarketQuote {
+                        symbol: symbol.clone(),
+                        price: 10.0 + index as f64,
+                        currency: Some("CNY".to_string()),
+                        volume: None,
+                        source: "batch-test".to_string(),
+                        updated_at: now_iso(),
+                    })
+                })
+                .collect()
+        }
+
+        async fn exchange_rate(
+            &self,
+            from_currency: &str,
+            to_currency: &str,
+        ) -> Result<ExchangeRate, MarketDataError> {
+            Ok(ExchangeRate {
+                from_currency: from_currency.to_ascii_uppercase(),
+                to_currency: to_currency.to_ascii_uppercase(),
+                rate: 1.0,
+                source: "batch-test".to_string(),
+                updated_at: now_iso(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn security_symbols_schema_stores_only_lookup_fields() {
         let pool = SqlitePoolOptions::new()
@@ -64,6 +123,77 @@ mod tests {
             columns,
             vec!["symbol", "name", "market", "currency", "updated_at"]
         );
+    }
+
+    #[tokio::test]
+    async fn portfolio_price_refresh_uses_batch_quotes() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        database::migrate(&pool).await.expect("migrate");
+
+        commit_draft_rows_with_symbol_resolver(
+            &pool,
+            Arc::new(MockMarketDataProvider),
+            PortfolioDraftCommitRequest {
+                rows: vec![
+                    PortfolioDraftRow {
+                        symbol: "000001.SZ".to_string(),
+                        name: "Ping An Bank".to_string(),
+                        quantity: "100".to_string(),
+                        average_cost: "9".to_string(),
+                        currency: "CNY".to_string(),
+                        account: None,
+                        market: "CN".to_string(),
+                        sector: None,
+                        imported_market_value: None,
+                        last_price: Some("9.5".to_string()),
+                        notes: None,
+                        confidence: "high".to_string(),
+                        warnings: Vec::new(),
+                        errors: Vec::new(),
+                    },
+                    PortfolioDraftRow {
+                        symbol: "600036.SS".to_string(),
+                        name: "CMB".to_string(),
+                        quantity: "200".to_string(),
+                        average_cost: "35".to_string(),
+                        currency: "CNY".to_string(),
+                        account: None,
+                        market: "CN".to_string(),
+                        sector: None,
+                        imported_market_value: None,
+                        last_price: Some("36".to_string()),
+                        notes: None,
+                        confidence: "high".to_string(),
+                        warnings: Vec::new(),
+                        errors: Vec::new(),
+                    },
+                ],
+            },
+            &FixedSymbolResolver { symbol: None },
+        )
+        .await
+        .expect("seed positions");
+
+        let batch_calls = StdArc::new(AtomicUsize::new(0));
+        let single_calls = StdArc::new(AtomicUsize::new(0));
+        let result = refresh_prices(
+            &pool,
+            Arc::new(BatchOnlyMarketDataProvider {
+                batch_calls: batch_calls.clone(),
+                single_calls: single_calls.clone(),
+            }),
+        )
+        .await
+        .expect("refresh prices");
+
+        assert_eq!(result.refreshed, 2);
+        assert_eq!(result.failed, 0);
+        assert_eq!(batch_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(single_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -624,6 +754,7 @@ mod tests {
         assert!(result.draft_rows[0].errors.is_empty());
     }
 
+    include!("tests_performance.rs");
     include!("tests_public_symbols.rs");
 
     async fn migrated_pool() -> SqlitePool {

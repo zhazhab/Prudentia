@@ -93,11 +93,12 @@ curl -X POST http://127.0.0.1:8080/api/research/portfolio-review
 - `GET /api/portfolio/symbols/search?q=浦发银行&market=CN&currency=CNY`
 - `POST /api/portfolio/symbols/refresh`
 - `POST /api/portfolio/symbols/resolve-draft`
-- `GET /api/portfolio/positions`
+- `GET /api/portfolio/positions?period=month|year|since_inception`
 - `PATCH /api/portfolio/positions/{symbol}`
 - `DELETE /api/portfolio/positions/{symbol}`
 - `GET /api/portfolio/summary`
 - `GET /api/portfolio/performance?period=month|year|since_inception`
+- `GET /api/portfolio/cash-flows?period=month|year|since_inception`
 - `POST /api/portfolio/prices/refresh`
 
 文件预览请求会返回 headers、sample rows、建议 mapping，以及可编辑 `draft_rows`：
@@ -210,6 +211,8 @@ curl "http://127.0.0.1:8080/api/portfolio/symbols/search?q=700&market=HK&currenc
 
 确认草稿会先为缺少 `symbol` 的行执行同一套本地匹配，然后按 `symbol` 归并重复行：数量相加，平均成本按数量加权；如果行里有 `last_price`，市值按 `last_price × quantity` 计算，否则才使用 `imported_market_value`。币种或市场冲突会被拒绝。随后按 `symbol` 合并更新，不会删除本次草稿中没有出现的旧持仓。任何草稿行存在 `errors` 时都会被拒绝；低置信行只保留 warning，由用户校对后确认。
 
+`GET /api/portfolio/positions` 的 `period` 可选，支持 `month`、`year` 和 `since_inception`；省略时等同于 `month` 口径。返回的单只持仓包含本币 `market_value`、按 FX 转换后的 CNY 市值 `market_value_base`、本币 `unrealized_pnl`、当前浮盈亏率 `unrealized_pnl_pct`，以及按持仓快照计算的 CNY 周期收益 `period_profit_loss_base` 和周期收益率 `period_return_pct`。列表默认按 `market_value_base` 降序返回；如果该持仓在所选周期内没有可用起始快照，周期字段为 `null`。
+
 `PATCH /api/portfolio/positions/{symbol}` 支持更新 `name`、`quantity`、`average_cost`、`currency`、`account`、`market`、`sector`、`imported_market_value` 和 `notes`。`DELETE /api/portfolio/positions/{symbol}` 用于删除清仓或错误持仓。
 
 `GET /api/portfolio/summary` 保留旧的 native 汇总字段，同时返回：
@@ -219,16 +222,20 @@ curl "http://127.0.0.1:8080/api/portfolio/symbols/search?q=700&market=HK&currenc
 - `market_groups`：按 market + currency 分组的 native 市值、CNY 市值和权重。
 - `fx_rates` / `fx_stale_count`：用于 CNY 口径的汇率和 stale 状态。
 
-`GET /api/portfolio/performance` 返回基于组合快照的收益表现。`period` 支持 `month`、`year` 和 `since_inception`，边界按 Asia/Shanghai 自然月/自然年。返回包含：
+持仓收益按券商持仓页常见口径计算：单只持仓本币市值为 `last_price × quantity`，本币浮盈亏为 `(last_price - average_cost) × quantity`，当前浮盈亏率为 `unrealized_pnl / (average_cost × quantity)`；汇总 CNY 浮盈亏为各持仓本币浮盈亏按 FX 转换后的合计。单只持仓收益不把组合层面的买入/卖出变动计入收益率调整。
 
-- `portfolio`：周期起止 CNY 市值、金额收益 `end_value_base - start_value_base`、百分比收益 `end_value_base / start_value_base - 1` 和年化收益 `annualized_return_pct`。
+`GET /api/portfolio/cash-flows` 按所选周期返回系统自动记录的交易调整。导入确认、草稿确认、持仓编辑和持仓删除导致组合 CNY 市值变化时，会按变化方向记录 `buy` 或 `sell` 调整；行情刷新不会产生交易调整。交易调整只影响组合收益率，不改变单只持仓成本或浮盈亏。
+
+`GET /api/portfolio/performance` 返回组合收益表现。`period` 支持 `month`、`year` 和 `since_inception`，边界按 Asia/Shanghai 自然月/自然年。返回包含：
+
+- `portfolio`：周期起止 CNY 市值、扣除净交易调整后的金额收益 `end_value_base - start_value_base - net_cash_flow_base`、交易调整后的时间加权收益率 `return_pct`、未调整交易变动的快照收益率 `simple_return_pct`、净交易调整 `net_cash_flow_base`、年化收益 `annualized_return_pct` 和 `return_method = "time_weighted"`。
 - `partial_period`：周期起点没有快照时为 `true`，客户端可显示“自 YYYY-MM-DD 起”。
-- `series`：组合快照序列，每个点包含累计收益率和可计算时的年化收益率。
-- `benchmarks`：标普、恒生、上证 ETF 代理（`SPY`、`2800.HK`、`510210.SS`）的同周期累计收益率和年化收益率。它们是指数代理，不是官方指数点位；抓取失败时标记 unavailable/stale，不阻塞组合表现。
+- `series`：组合快照序列，每个点包含累计净交易调整、扣除净交易调整后的金额收益、时间加权累计收益率、未调整快照收益率和可计算时的年化收益率。
+- `benchmarks`：标普 ETF 代理 `SPY`、恒生 ETF 代理 `2800.HK`、官方上证综指 `000001.SS` 的同周期累计收益率和年化收益率；抓取失败时标记 unavailable/stale，不阻塞组合表现。
 
-Performance v1 是组合市值快照变化视角，不处理交易流水、出入金、分红、手续费或复权。导入确认、编辑、删除和每日行情刷新都会写入快照。前端指数对比支持累计收益、年化收益和相对指数超额收益三个维度；超额收益按组合累计收益率减去指数代理累计收益率展示。
+Performance 使用组合市值快照和自动交易调整计算时间加权收益率。每个快照区间的收益率按 `(期末市值 - 区间净交易调整) / 期初市值 - 1` 计算，再进行连乘。导入确认、编辑、删除和每日行情刷新都会写入组合快照和当前持仓快照；`GET /api/portfolio/positions?period=...` 使用持仓快照计算单只持仓在同一周期内的 CNY 收益和收益率。Benchmark 快照只跟随持仓价格刷新周期写入，确保基准和持仓行情使用同一轮 `price_refresh`。前端基准对比支持累计收益、年化收益和相对基准超额收益三个维度；超额收益按组合时间加权累计收益率减去 benchmark 累计收益率展示。
 
-Market data provider 会刷新股票报价、FX 和 benchmark ETF。Alpha Vantage provider 使用 `CURRENCY_EXCHANGE_RATE` 获取 FX；刷新失败时会保留最后成功汇率并标记 stale。后端启动和后台任务按每日 TTL 检查刷新，默认 24 小时；`POST /api/portfolio/prices/refresh` 保留为 API/内部能力，但当前前端不显示刷新按钮。
+Market data provider 会刷新股票报价、FX 和 benchmark。`MARKET_DATA_PROVIDER` 支持逗号分隔的 fallback 链，例如 `yahoo,tencent` 或 `longbridge,yahoo`；当前 provider 包含 `mock`、`yahoo`、`tencent`、`longbridge` 和 `alpha_vantage`。Yahoo 和腾讯行情不需要 API key；腾讯 provider 负责股票报价和上证综指，FX 使用 Yahoo 货币对查询作为 adapter fallback；Longbridge provider 使用 `LONGBRIDGE_APP_KEY`、`LONGBRIDGE_APP_SECRET` 和 `LONGBRIDGE_ACCESS_TOKEN`；Alpha Vantage provider 使用 `CURRENCY_EXCHANGE_RATE` 获取 FX。`mock` 只用于离线开发，不会把持仓或 benchmark 收益更新为可用数据。后端启动和后台任务按每日 TTL 检查刷新，默认 24 小时；`POST /api/portfolio/prices/refresh` 和持仓页手动刷新会强制执行一次刷新，但仍受 provider 级最小请求间隔、429/频控冷却和 fallback 降级保护。腾讯行情和长桥会对同一轮持仓/benchmark 报价使用 batch；Yahoo/Alpha Vantage 保持逐只请求并由限速 wrapper 串行化。刷新失败时会保留最后成功汇率并标记 stale。
 
 ## Decisions
 

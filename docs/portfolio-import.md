@@ -10,7 +10,7 @@
 4. 后端默认用免账号 public provider 自动后台刷新本地代码库；用户可以对当前草稿执行“匹配代码”，系统只查本地 `security_symbols`，不在导入时实时外部搜索。
 5. 用户修正草稿中的字段、删除错误行，并确认导入；相同 `symbol` 的草稿行会自动归并。
 6. 后端按 `symbol` 合并写入 SQLite，不删除本次未出现的旧持仓。
-7. 后端重新计算 market value、unrealized P/L、CNY 口径权重和 portfolio summary，并写入一条组合收益快照。
+7. 后端重新计算 market value、unrealized P/L、收益率、CNY 口径权重和 portfolio summary，并写入组合收益快照和当前持仓快照。
 
 ## 截图识别草稿
 
@@ -66,13 +66,13 @@ Prudentia 会优先根据 `symbol` 自动推断第一阶段支持的市场：
 - `HK`：港股代码，例如 `0700.HK` 或 5 位以内纯数字代码。
 - `CN`：A 股代码，例如 `600519`、`000001`、`.SS`、`.SZ` 后缀。
 
-草稿里的 `market` 和 `currency` 始终可以手动编辑。每个市场按本市场币种展示 native 市值，同时固定使用 `CNY` 作为基础币种计算总持仓额和权重。
+草稿里的 `market` 和 `currency` 始终可以手动编辑。每个市场按本市场币种展示 native 市值，同时固定使用 `CNY` 作为基础币种计算总持仓额和权重。前端金额展示统一使用 ISO 币种前缀，例如 `CNY 1,234.56`、`HKD 1,234.56`、`USD 1,234.56`。
 
-Market data provider 会负责刷新股票报价和 FX。Mock provider 使用确定性汇率；Alpha Vantage provider 使用 `CURRENCY_EXCHANGE_RATE`。如果 FX 刷新失败，系统会保留最后成功汇率并标记为 stale。
+Market data provider 会负责刷新股票报价和 FX。`MARKET_DATA_PROVIDER` 可配置为逗号 fallback 链，例如 `yahoo,tencent` 或 `longbridge,yahoo`；当前支持 mock、Yahoo Finance、腾讯行情、长桥 OpenAPI 和 Alpha Vantage-compatible。Mock provider 只用于离线开发，不会把持仓或 benchmark 收益更新为可用数据；腾讯 provider 负责股票报价，FX 通过 Yahoo 货币对 adapter 查询；Alpha Vantage provider 使用 `CURRENCY_EXCHANGE_RATE`。如果 FX 刷新失败，系统会保留最后成功汇率并标记为 stale。
 
 ## 自动更新
 
-后端启动和后台任务会按每日 TTL 检查是否需要刷新行情、FX 和指数代理 ETF，默认 24 小时内不重复请求外部 provider。刷新失败只记录 warning，并保留 stale 状态；前端不提供显式刷新按钮，只在进入页面、窗口聚焦和导入/编辑/删除后重新读取本地 API 数据。
+后端启动和后台任务会按每日 TTL 检查是否需要刷新行情、FX 和 benchmark，默认 24 小时内不重复请求外部 provider。持仓页的手动刷新会强制执行一次刷新，但仍受 provider 级最小请求间隔、429/频控冷却和 fallback 降级保护；腾讯行情和长桥会对同一轮持仓/benchmark 报价使用 batch 获取。Benchmark 只在同一轮持仓价格刷新里写入快照，不随导入、编辑或删除单独刷新。刷新失败只记录 warning，并保留 stale 状态；前端在进入页面、窗口聚焦和导入/编辑/删除后会重新读取本地 API 数据。
 
 自动更新只刷新由行情派生的字段：
 
@@ -83,8 +83,10 @@ Market data provider 会负责刷新股票报价和 FX。Mock provider 使用确
 - `price_updated_at`
 - `price_stale`
 
-导入确认、持仓编辑、删除和每日行情刷新都会写入组合收益快照。Portfolio Performance 的 `本月`、`本年`、`记录起` 视角基于周期内最早和最新快照计算：金额收益为 `end_value_base - start_value_base`，百分比收益为 `end_value_base / start_value_base - 1`，年化收益按 `(end_value_base / start_value_base) ^ (365.25 / elapsed_days) - 1` 计算；只有一条起点快照且收益为 0 时显示 0。如果周期起点没有快照，UI 会显示“自 YYYY-MM-DD 起”。该口径不处理交易流水、出入金、分红、手续费或复权；当前持仓浮盈仍保留在持仓表中。
+持仓收益按券商持仓页常见口径计算：单只持仓本币市值为 `last_price × quantity`，本币浮盈亏为 `(last_price - average_cost) × quantity`；组合 CNY 浮盈亏为各持仓本币浮盈亏按 FX 转换后的合计。单只持仓收益不把组合层面的买入/卖出变动计入收益率调整。
 
-指数对比使用 ETF 代理：标普 `SPY`、恒生 `2800.HK`、上证 `510210.SS`。它们不是官方指数点位，抓取失败只会标记 unavailable/stale，不影响组合收益读取。前端支持累计收益、年化收益和相对指数超额收益三个对比维度；超额收益按组合累计收益率减去指数代理累计收益率展示。
+导入确认、草稿确认、持仓编辑和持仓删除都会写入组合收益快照和当前持仓快照；这些动作导致 CNY 组合市值变化时，系统会自动记录 `buy` 或 `sell` 交易调整。每日行情刷新只写快照，不产生交易调整；benchmark 快照只跟随持仓价格刷新周期写入。Portfolio Performance 的 `本月`、`本年`、`记录起` 视角会读取同周期交易调整，并按时间加权收益率计算组合收益：每个快照区间收益为 `(期末市值 - 区间净交易调整) / 期初市值 - 1`，再连乘得到累计收益率；金额收益为 `end_value_base - start_value_base - net_cash_flow_base`；同时返回未调整交易变动的 `simple_return_pct` 作为解释字段。年化收益基于时间加权累计收益率计算；只有一条起点快照且收益为 0 时显示 0。如果周期起点没有快照，UI 会显示“自 YYYY-MM-DD 起”。持仓表复用同一个周期选择器，按单只持仓快照的 CNY 市值变化展示周期收益率；当前收益率仍按本币浮盈亏除以持仓成本展示。
+
+指数对比使用：标普 ETF 代理 `SPY`、恒生 ETF 代理 `2800.HK`、官方上证综指 `000001.SS`。抓取失败只会标记 unavailable/stale，不影响组合收益读取。前端支持累计收益、年化收益和相对指数超额收益三个对比维度；超额收益按组合累计收益率减去 benchmark 累计收益率展示。
 
 Position quantity 和 cost basis 仍由导入或手动更新控制。Broker transaction sync 有意不纳入 v1 范围。

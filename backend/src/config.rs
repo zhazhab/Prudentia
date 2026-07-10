@@ -1,4 +1,9 @@
-use std::{env, time::Duration};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -20,12 +25,39 @@ pub struct AppConfig {
     pub symbol_directory_refresh_interval_secs: Duration,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{local_state_dir_from_git_common_dir, resolve_sqlite_url};
+    use std::path::Path;
+
+    #[test]
+    fn relative_sqlite_url_resolves_under_original_repo_dir() {
+        let resolved = resolve_sqlite_url(
+            Some("sqlite://data/prudentia.sqlite".to_string()),
+            Path::new("/repo"),
+        );
+
+        assert_eq!(resolved, "sqlite:///repo/data/prudentia.sqlite");
+    }
+
+    #[test]
+    fn git_common_dir_parent_is_the_default_local_state_dir() {
+        assert_eq!(
+            local_state_dir_from_git_common_dir(Path::new("/repo/.git")),
+            Some(Path::new("/repo").to_path_buf())
+        );
+    }
+}
+
 impl AppConfig {
     pub fn from_env() -> Self {
+        Self::from_env_with_paths(&LocalAppPaths::discover())
+    }
+
+    pub fn from_env_with_paths(paths: &LocalAppPaths) -> Self {
         Self {
             bind_addr: env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "sqlite://data/prudentia.sqlite".to_string()),
+            database_url: resolve_sqlite_url(env::var("DATABASE_URL").ok(), &paths.root_dir),
             ai_provider: env::var("AI_PROVIDER").unwrap_or_else(|_| "mock".to_string()),
             openai_api_key: env::var("OPENAI_API_KEY").ok(),
             openai_base_url: env::var("OPENAI_BASE_URL")
@@ -69,4 +101,77 @@ impl AppConfig {
             .unwrap_or_else(|| Duration::from_secs(24 * 60 * 60)),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalAppPaths {
+    pub root_dir: PathBuf,
+    pub env_path: PathBuf,
+}
+
+impl LocalAppPaths {
+    pub fn discover() -> Self {
+        let root_dir = env::var("PRUDENTIA_LOCAL_DIR")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .map(resolve_against_current_dir)
+            .or_else(|| {
+                git_common_dir().and_then(|path| local_state_dir_from_git_common_dir(&path))
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
+        let env_path = root_dir.join(".env");
+        Self { root_dir, env_path }
+    }
+
+    pub fn load_env(&self) {
+        if self.env_path.exists() {
+            dotenvy::from_path(&self.env_path).ok();
+        } else {
+            dotenvy::dotenv().ok();
+        }
+    }
+}
+
+pub fn resolve_sqlite_url(value: Option<String>, local_state_dir: &Path) -> String {
+    let value = value.unwrap_or_else(|| "sqlite://data/prudentia.sqlite".to_string());
+    let Some(path) = value.strip_prefix("sqlite://") else {
+        return value;
+    };
+    if path == ":memory:" || path.starts_with('/') || path.is_empty() {
+        return value;
+    }
+    format!("sqlite://{}", local_state_dir.join(path).to_string_lossy())
+}
+
+fn resolve_against_current_dir(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    env::current_dir()
+        .map(|current_dir| current_dir.join(&path))
+        .unwrap_or(path)
+}
+
+fn git_common_dir() -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = PathBuf::from(path.trim());
+    Some(resolve_against_current_dir(path))
+}
+
+fn local_state_dir_from_git_common_dir(git_common_dir: &Path) -> Option<PathBuf> {
+    if git_common_dir
+        .file_name()
+        .is_some_and(|name| name == ".git")
+    {
+        return git_common_dir.parent().map(Path::to_path_buf);
+    }
+    None
 }

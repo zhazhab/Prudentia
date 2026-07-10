@@ -3,7 +3,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use prudentia_backend::{
-    ai::runtime::AiRuntime, config::AppConfig, database, market_data, portfolio, startup,
+    ai::runtime::AiRuntime,
+    config::{AppConfig, LocalAppPaths},
+    database, market_data, portfolio, startup,
 };
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::net::TcpListener;
@@ -11,7 +13,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dotenvy::dotenv().ok();
+    let local_paths = LocalAppPaths::discover();
+    local_paths.load_env();
 
     tracing_subscriber::registry()
         .with(
@@ -21,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config = AppConfig::from_env();
+    let config = AppConfig::from_env_with_paths(&local_paths);
     database::ensure_sqlite_file(&config.database_url)?;
 
     let pool = SqlitePoolOptions::new()
@@ -30,7 +33,10 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     database::migrate(&pool).await?;
 
-    let ai_provider = Arc::new(AiRuntime::from_config(&config));
+    let ai_provider = Arc::new(AiRuntime::from_config_with_env_path(
+        &config,
+        local_paths.env_path.clone(),
+    ));
     let market_provider = market_data::provider_from_config(&config);
 
     portfolio::start_price_refresh_job(

@@ -14,6 +14,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/summary", get(summary_handler))
         .route("/performance", get(performance_handler))
+        .route("/cash-flows", get(list_cash_flows_handler))
         .route("/prices/refresh", post(refresh_prices_handler))
 }
 
@@ -72,8 +73,9 @@ async fn commit_draft_handler(
 
 async fn list_positions_handler(
     State(state): State<AppState>,
+    Query(query): Query<PortfolioPositionsQuery>,
 ) -> AppResult<Json<Vec<PortfolioPosition>>> {
-    Ok(Json(list_positions(&state.pool).await?))
+    Ok(Json(list_positions_for_period(&state.pool, query).await?))
 }
 
 async fn update_position_handler(
@@ -105,6 +107,13 @@ async fn performance_handler(
     Query(query): Query<PortfolioPerformanceQuery>,
 ) -> AppResult<Json<PortfolioPerformanceResponse>> {
     Ok(Json(portfolio_performance(&state.pool, query).await?))
+}
+
+async fn list_cash_flows_handler(
+    State(state): State<AppState>,
+    Query(query): Query<PortfolioCashFlowQuery>,
+) -> AppResult<Json<Vec<PortfolioCashFlow>>> {
+    Ok(Json(list_cash_flows(&state.pool, query).await?))
 }
 
 async fn refresh_prices_handler(

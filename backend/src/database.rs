@@ -148,6 +148,74 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     pool.execute(
         r#"
+        CREATE TABLE IF NOT EXISTS portfolio_position_snapshots (
+            id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            name TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            average_cost REAL NOT NULL,
+            market_value REAL NOT NULL,
+            cost REAL NOT NULL,
+            unrealized_pnl REAL NOT NULL,
+            fx_rate REAL NOT NULL,
+            value_base REAL NOT NULL,
+            cost_base REAL NOT NULL,
+            unrealized_pnl_base REAL NOT NULL,
+            weight REAL NOT NULL,
+            source TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            FOREIGN KEY(snapshot_id) REFERENCES portfolio_performance_snapshots(id) ON DELETE CASCADE
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_portfolio_position_snapshots_symbol_time
+        ON portfolio_position_snapshots(symbol, captured_at);
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_portfolio_position_snapshots_snapshot
+        ON portfolio_position_snapshots(snapshot_id);
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS portfolio_cash_flows (
+            id TEXT PRIMARY KEY,
+            occurred_at TEXT NOT NULL,
+            flow_type TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            amount REAL NOT NULL,
+            fx_rate REAL NOT NULL,
+            amount_base REAL NOT NULL,
+            note TEXT,
+            source TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_portfolio_cash_flows_occurred_at
+        ON portfolio_cash_flows(occurred_at);
+        "#,
+    )
+    .await?;
+
+    pool.execute(
+        r#"
         CREATE TABLE IF NOT EXISTS portfolio_benchmark_snapshots (
             id TEXT PRIMARY KEY,
             snapshot_id TEXT NOT NULL,

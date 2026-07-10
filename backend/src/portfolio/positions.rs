@@ -1,3 +1,15 @@
+#[derive(Debug, Clone)]
+struct PositionPeriodSnapshotRow {
+    symbol: String,
+    value_base: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PositionPeriodBounds {
+    start_value_base: f64,
+    end_value_base: f64,
+}
+
 pub async fn list_positions(pool: &SqlitePool) -> AppResult<Vec<PortfolioPosition>> {
     let rows = sqlx::query(
         r#"
@@ -5,13 +17,35 @@ pub async fn list_positions(pool: &SqlitePool) -> AppResult<Vec<PortfolioPositio
                sector, notes, last_price, market_value, unrealized_pnl, weight,
                price_updated_at, price_stale, updated_at
         FROM portfolio_positions
-        ORDER BY market_value DESC, symbol ASC
+        ORDER BY symbol ASC
         "#,
     )
     .fetch_all(pool)
     .await?;
 
-    rows.into_iter().map(position_from_db_row).collect()
+    let mut positions = rows
+        .into_iter()
+        .map(position_from_db_row)
+        .collect::<AppResult<Vec<_>>>()?;
+    apply_position_base_values(pool, &mut positions).await?;
+    positions.sort_by(|left, right| {
+        right
+            .market_value_base
+            .total_cmp(&left.market_value_base)
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    Ok(positions)
+}
+
+pub async fn list_positions_for_period(
+    pool: &SqlitePool,
+    query: PortfolioPositionsQuery,
+) -> AppResult<Vec<PortfolioPosition>> {
+    let period = parse_performance_period(query.period.as_deref())?;
+    let period_start = period_start_utc(period);
+    let mut positions = list_positions(pool).await?;
+    apply_position_period_metrics(pool, &mut positions, period_start.as_deref()).await?;
+    Ok(positions)
 }
 
 pub async fn update_position(
@@ -227,6 +261,13 @@ fn summary_from_positions(
     })
 }
 
+async fn apply_position_base_values(pool: &SqlitePool, positions: &mut [PortfolioPosition]) -> AppResult<()> {
+    let fx_rates = load_fx_rates(pool).await?;
+    for position in positions {
+        position.market_value_base = position.market_value * fx_rate_for(&position.currency, &fx_rates);
+    }
+    Ok(())
+}
 pub async fn refresh_prices(
     pool: &SqlitePool,
     market_data: Arc<dyn MarketDataProvider>,
@@ -235,11 +276,22 @@ pub async fn refresh_prices(
     let mut refreshed = 0;
     let mut failed = 0;
     let mut failures = Vec::new();
+    let symbols = positions
+        .iter()
+        .map(|position| position.symbol.clone())
+        .collect::<Vec<_>>();
+    let mut quote_results = market_data.quotes(&symbols).await.into_iter();
 
     for position in positions {
-        match market_data.quote(&position.symbol).await {
+        let quote_result = quote_results.next().unwrap_or_else(|| {
+            Err(crate::market_data::MarketDataError::Provider(format!(
+                "{}: missing batch quote result",
+                position.symbol
+            )))
+        });
+        match quote_result {
             Ok(quote) => {
-                if quote.source.trim().eq_ignore_ascii_case("mock") {
+                if is_mock_market_data_source(&quote.source) {
                     failed += 1;
                     failures.push(format!(
                         "{}: mock quote provider does not update portfolio prices",
@@ -286,8 +338,143 @@ pub async fn refresh_prices(
         refreshed,
         failed,
         failures,
-        positions: list_positions(pool).await?,
+        positions: list_positions_for_period(
+            pool,
+            PortfolioPositionsQuery {
+                period: Some("since_inception".to_string()),
+            },
+        )
+        .await?,
     })
+}
+
+async fn record_position_snapshots(
+    pool: &SqlitePool,
+    snapshot_id: &str,
+    captured_at: &str,
+    source: &str,
+) -> AppResult<()> {
+    let positions = list_positions(pool).await?;
+    let fx_rates = load_fx_rates(pool).await?;
+
+    for position in positions {
+        let fx_rate = fx_rate_for(&position.currency, &fx_rates);
+        let cost = position.quantity * position.average_cost;
+        let value_base = position.market_value * fx_rate;
+        let cost_base = cost * fx_rate;
+        let unrealized_pnl_base = position.unrealized_pnl * fx_rate;
+
+        sqlx::query(
+            r#"
+            INSERT INTO portfolio_position_snapshots (
+                id, snapshot_id, symbol, name, currency, quantity, average_cost,
+                market_value, cost, unrealized_pnl, fx_rate, value_base, cost_base,
+                unrealized_pnl_base, weight, source, captured_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(snapshot_id)
+        .bind(&position.symbol)
+        .bind(&position.name)
+        .bind(&position.currency)
+        .bind(position.quantity)
+        .bind(position.average_cost)
+        .bind(position.market_value)
+        .bind(cost)
+        .bind(position.unrealized_pnl)
+        .bind(fx_rate)
+        .bind(value_base)
+        .bind(cost_base)
+        .bind(unrealized_pnl_base)
+        .bind(position.weight)
+        .bind(source)
+        .bind(captured_at)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn apply_position_period_metrics(
+    pool: &SqlitePool,
+    positions: &mut [PortfolioPosition],
+    period_start: Option<&str>,
+) -> AppResult<()> {
+    if positions.is_empty() {
+        return Ok(());
+    }
+
+    let current_symbols = positions
+        .iter()
+        .map(|position| position.symbol.clone())
+        .collect::<HashSet<_>>();
+    let snapshots = load_position_period_snapshots(pool, period_start).await?;
+    let mut bounds_by_symbol: HashMap<String, PositionPeriodBounds> = HashMap::new();
+
+    for snapshot in snapshots {
+        if !current_symbols.contains(&snapshot.symbol) {
+            continue;
+        }
+
+        bounds_by_symbol
+            .entry(snapshot.symbol)
+            .and_modify(|bounds| bounds.end_value_base = snapshot.value_base)
+            .or_insert(PositionPeriodBounds {
+                start_value_base: snapshot.value_base,
+                end_value_base: snapshot.value_base,
+            });
+    }
+
+    for position in positions {
+        if let Some(bounds) = bounds_by_symbol.get(&position.symbol) {
+            let profit_loss = bounds.end_value_base - bounds.start_value_base;
+            position.period_profit_loss_base = Some(profit_loss);
+            position.period_return_pct = ratio_option(profit_loss, bounds.start_value_base);
+        }
+    }
+
+    Ok(())
+}
+
+async fn load_position_period_snapshots(
+    pool: &SqlitePool,
+    period_start: Option<&str>,
+) -> AppResult<Vec<PositionPeriodSnapshotRow>> {
+    let rows = if let Some(period_start) = period_start {
+        sqlx::query(
+            r#"
+            SELECT symbol, value_base
+            FROM portfolio_position_snapshots
+            WHERE captured_at >= ?
+            ORDER BY symbol ASC, captured_at ASC, id ASC
+            "#,
+        )
+        .bind(period_start)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT symbol, value_base
+            FROM portfolio_position_snapshots
+            ORDER BY symbol ASC, captured_at ASC, id ASC
+            "#,
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(PositionPeriodSnapshotRow {
+                symbol: row.try_get("symbol")?,
+                value_base: row.try_get("value_base")?,
+            })
+        })
+        .collect()
 }
 
 async fn mark_position_price_stale(pool: &SqlitePool, position: &PortfolioPosition) -> AppResult<()> {

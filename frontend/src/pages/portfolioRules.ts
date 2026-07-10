@@ -68,12 +68,98 @@ export const positionTableDisplayFields = [
   "average_cost",
   "market_value",
   "unrealized_pnl",
+  "unrealized_pnl_pct",
+  "period_return_pct",
   "weight"
 ] as const;
 
 export type PositionTableDisplayField = (typeof positionTableDisplayFields)[number];
 
+export const positionTableSortableFields = [
+  "market_value",
+  "unrealized_pnl",
+  "unrealized_pnl_pct",
+  "period_return_pct",
+  "weight"
+] as const satisfies readonly PositionTableDisplayField[];
+
+export type PositionSortField = (typeof positionTableSortableFields)[number];
+export type PositionSortDirection = "asc" | "desc";
+
+export interface PositionSortRule {
+  field: PositionSortField;
+  direction: PositionSortDirection;
+}
+
+export const defaultPositionSortRule: PositionSortRule = {
+  field: "market_value",
+  direction: "desc"
+};
+
 export const portfolioDashboardPanelIds = ["positions"] as const;
+
+export function sortPositions(positions: PortfolioPosition[], sortRule: PositionSortRule): PortfolioPosition[] {
+  const normalizedRule = normalizePositionSortRule(sortRule);
+  return [...positions].sort((left, right) => {
+    const leftValue = positionSortValue(left, normalizedRule.field);
+    const rightValue = positionSortValue(right, normalizedRule.field);
+    const leftMissing = leftValue === null || leftValue === undefined;
+    const rightMissing = rightValue === null || rightValue === undefined;
+
+    if (leftMissing || rightMissing) {
+      if (leftMissing && rightMissing) {
+        return left.symbol.localeCompare(right.symbol);
+      }
+      return leftMissing ? 1 : -1;
+    }
+
+    if (leftValue === rightValue) {
+      return left.symbol.localeCompare(right.symbol);
+    }
+
+    const comparison = leftValue - rightValue;
+    return normalizedRule.direction === "asc" ? comparison : -comparison;
+  });
+}
+
+export function nextPositionSortRule(
+  current: PositionSortRule,
+  field: PositionSortField
+): PositionSortRule {
+  const normalizedRule = normalizePositionSortRule(current);
+  if (normalizedRule.field !== field) {
+    return { field, direction: "desc" };
+  }
+  return {
+    field,
+    direction: normalizedRule.direction === "desc" ? "asc" : "desc"
+  };
+}
+
+export function normalizePositionSortRule(value: unknown): PositionSortRule {
+  if (!value || typeof value !== "object") {
+    return defaultPositionSortRule;
+  }
+  const candidate = value as Partial<PositionSortRule>;
+  const field = positionTableSortableFields.find((item) => item === candidate.field);
+  const direction = candidate.direction === "asc" || candidate.direction === "desc" ? candidate.direction : null;
+  return field && direction ? { field, direction } : defaultPositionSortRule;
+}
+
+function positionSortValue(position: PortfolioPosition, field: PositionSortField) {
+  switch (field) {
+    case "market_value":
+      return position.market_value_base;
+    case "unrealized_pnl":
+      return position.unrealized_pnl;
+    case "unrealized_pnl_pct":
+      return position.unrealized_pnl_pct;
+    case "period_return_pct":
+      return position.period_return_pct;
+    case "weight":
+      return position.weight;
+  }
+}
 
 export function portfolioImportFileKind(file: Pick<File, "name" | "type">): PortfolioImportFileKind {
   const mimeType = file.type.trim().toLowerCase();
@@ -460,15 +546,20 @@ export function validateDraftRow(row: PortfolioDraftRow) {
 }
 
 export function formatMoney(value: number, currency: string) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: currency || "USD",
+  const currencyCode = (currency || "USD").trim().toUpperCase();
+  const amount = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
     maximumFractionDigits: 2
   }).format(value);
+  return `${currencyCode} ${amount}`;
 }
 
 export function percent(value: number) {
   return `${(value * 100).toFixed(1)}%`;
+}
+
+export function formatReturnPercent(value: number) {
+  return `${(value * 100).toFixed(2)}%`;
 }
 
 function emptyToNull(value: string) {

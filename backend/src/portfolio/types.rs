@@ -12,11 +12,20 @@ pub struct PortfolioPosition {
     pub notes: Option<String>,
     pub last_price: Option<f64>,
     pub market_value: f64,
+    pub market_value_base: f64,
     pub unrealized_pnl: f64,
+    pub unrealized_pnl_pct: Option<f64>,
+    pub period_profit_loss_base: Option<f64>,
+    pub period_return_pct: Option<f64>,
     pub weight: f64,
     pub price_updated_at: Option<String>,
     pub price_stale: bool,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PortfolioPositionsQuery {
+    pub period: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -221,8 +230,11 @@ pub struct PortfolioPerformanceMetric {
     pub start_value_base: Option<f64>,
     pub end_value_base: Option<f64>,
     pub profit_loss_base: Option<f64>,
+    pub net_cash_flow_base: f64,
     pub return_pct: Option<f64>,
+    pub simple_return_pct: Option<f64>,
     pub annualized_return_pct: Option<f64>,
+    pub return_method: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -230,8 +242,29 @@ pub struct PortfolioPerformancePoint {
     pub captured_at: String,
     pub value_base: f64,
     pub profit_loss_base: Option<f64>,
+    pub net_cash_flow_base: f64,
     pub return_pct: Option<f64>,
+    pub simple_return_pct: Option<f64>,
     pub annualized_return_pct: Option<f64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PortfolioCashFlowQuery {
+    pub period: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioCashFlow {
+    pub id: String,
+    pub occurred_at: String,
+    pub flow_type: String,
+    pub currency: String,
+    pub amount: f64,
+    pub fx_rate: f64,
+    pub amount_base: f64,
+    pub note: Option<String>,
+    pub source: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

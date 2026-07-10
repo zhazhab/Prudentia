@@ -926,6 +926,31 @@ th {
   text-transform: uppercase;
 }
 
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  text-transform: inherit;
+}
+
+.table-sort-button:hover {
+  color: #2f6f73;
+}
+
+.table-sort-button svg {
+  flex: 0 0 auto;
+  color: #7c857a;
+}
+
 .warning-box {
   padding: 12px;
   border: 1px solid #f1c8cf;

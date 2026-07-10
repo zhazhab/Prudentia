@@ -101,6 +101,10 @@ impl AiRuntime {
         Self::new(AiSettings::from_config(config), ".env")
     }
 
+    pub fn from_config_with_env_path(config: &AppConfig, env_path: impl Into<PathBuf>) -> Self {
+        Self::new(AiSettings::from_config(config), env_path)
+    }
+
     pub fn settings_response(&self) -> AiSettingsResponse {
         self.settings()
     }
@@ -277,6 +281,10 @@ impl AiSettings {
 }
 
 fn write_env_file(path: &Path, settings: &AiSettings) -> Result<(), AiError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| AiError::Provider(format!("failed to create .env directory: {err}")))?;
+    }
     let current = fs::read_to_string(path).unwrap_or_default();
     let mut lines = current.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
 

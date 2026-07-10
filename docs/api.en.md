@@ -93,11 +93,12 @@ Distillations, stock snapshots, and portfolio reviews are saved as research reco
 - `GET /api/portfolio/symbols/search?q=Tencent&market=HK&currency=HKD`
 - `POST /api/portfolio/symbols/refresh`
 - `POST /api/portfolio/symbols/resolve-draft`
-- `GET /api/portfolio/positions`
+- `GET /api/portfolio/positions?period=month|year|since_inception`
 - `PATCH /api/portfolio/positions/{symbol}`
 - `DELETE /api/portfolio/positions/{symbol}`
 - `GET /api/portfolio/summary`
 - `GET /api/portfolio/performance?period=month|year|since_inception`
+- `GET /api/portfolio/cash-flows?period=month|year|since_inception`
 - `POST /api/portfolio/prices/refresh`
 
 File preview returns headers, sample rows, a suggested mapping, and editable `draft_rows`:
@@ -210,6 +211,8 @@ The server emits `accepted`, `progress`, `completed`, `failed`, and `canceled` m
 
 Draft confirmation first runs the same local matching for rows without `symbol`, then merges duplicate rows by `symbol`: quantity is added and average cost is weighted by quantity. If a row has `last_price`, market value is computed as `last_price × quantity`; otherwise `imported_market_value` is used. Currency or market conflicts are rejected. It then merge-upserts by `symbol` and does not delete existing holdings that are absent from the current draft. Rows with `errors` are rejected; low-confidence rows keep warnings and can be confirmed after user review.
 
+`GET /api/portfolio/positions` accepts an optional `period` query parameter: `month`, `year`, or `since_inception`; omitting it uses the `month` view. Each returned holding includes native `market_value`, FX-converted CNY value `market_value_base`, native `unrealized_pnl`, current return rate `unrealized_pnl_pct`, and position-snapshot-based CNY period P/L `period_profit_loss_base` plus period return `period_return_pct`. The list defaults to `market_value_base` descending; if the holding has no usable starting snapshot in the selected period, the period fields are `null`.
+
 `PATCH /api/portfolio/positions/{symbol}` supports updating `name`, `quantity`, `average_cost`, `currency`, `account`, `market`, `sector`, `imported_market_value`, and `notes`. `DELETE /api/portfolio/positions/{symbol}` removes closed or incorrect holdings.
 
 `GET /api/portfolio/summary` keeps the legacy native summary fields and also returns:
@@ -219,16 +222,20 @@ Draft confirmation first runs the same local matching for rows without `symbol`,
 - `market_groups`: market + currency groups with native value, CNY value, and weight.
 - `fx_rates` / `fx_stale_count`: FX rates and stale state used for the CNY view.
 
-`GET /api/portfolio/performance` returns snapshot-based portfolio performance. `period` accepts `month`, `year`, and `since_inception`; month/year boundaries use Asia/Shanghai calendar periods. The response includes:
+Holding returns use the common broker holdings-page convention: native market value is `last_price × quantity`, native unrealized P/L is `(last_price - average_cost) × quantity`, current return rate is `unrealized_pnl / (average_cost × quantity)`, and CNY unrealized P/L sums each holding's native unrealized P/L after FX conversion. Per-holding returns do not treat portfolio-level buy/sell changes as return adjustments.
 
-- `portfolio`: period start/end CNY value, amount return `end_value_base - start_value_base`, percentage return `end_value_base / start_value_base - 1`, and annualized return `annualized_return_pct`.
+`GET /api/portfolio/cash-flows` returns system-recorded trade adjustments in the selected period. Import confirmation, draft confirmation, position edits, and position deletes record a `buy` or `sell` adjustment when the CNY portfolio value changes; quote refreshes never create trade adjustments. Trade adjustments only affect portfolio-level return calculations and do not change per-holding cost basis or unrealized P/L.
+
+`GET /api/portfolio/performance` returns portfolio performance. `period` accepts `month`, `year`, and `since_inception`; month/year boundaries use Asia/Shanghai calendar periods. The response includes:
+
+- `portfolio`: period start/end CNY value, amount P/L after net trade adjustments `end_value_base - start_value_base - net_cash_flow_base`, trade-adjusted time-weighted return `return_pct`, unadjusted snapshot return `simple_return_pct`, net trade adjustment `net_cash_flow_base`, annualized return `annualized_return_pct`, and `return_method = "time_weighted"`.
 - `partial_period`: `true` when no snapshot exists at the period start, so clients can display "since YYYY-MM-DD".
-- `series`: portfolio snapshot series, with cumulative return and annualized return when computable.
-- `benchmarks`: S&P, Hang Seng, and SSE ETF proxies (`SPY`, `2800.HK`, `510210.SS`) over the same period, with cumulative and annualized returns. These are index proxies, not official index levels; quote failures mark a proxy unavailable/stale without blocking portfolio performance.
+- `series`: portfolio snapshot series with cumulative net trade adjustment, amount P/L after net trade adjustments, time-weighted cumulative return, unadjusted snapshot return, and annualized return when computable.
+- `benchmarks`: S&P ETF proxy `SPY`, Hang Seng ETF proxy `2800.HK`, and the official SSE Composite `000001.SS` over the same period, with cumulative and annualized returns. Quote failures mark a benchmark unavailable/stale without blocking portfolio performance.
 
-Performance v1 is a portfolio value snapshot-change view. It does not adjust for transactions, cash flows, dividends, fees, or splits. Draft confirmation, edit, delete, and daily quote refreshes all write snapshots. The frontend benchmark comparison supports cumulative return, annualized return, and relative excess return; excess return is displayed as portfolio cumulative return minus ETF-proxy cumulative return.
+Performance uses portfolio value snapshots and automatic trade adjustments to calculate time-weighted return. Each snapshot interval uses `(ending value - interval net trade adjustment) / starting value - 1`, then compounds the interval returns. Draft confirmation, edit, delete, and daily quote refreshes all write portfolio snapshots and current position snapshots; `GET /api/portfolio/positions?period=...` uses position snapshots to calculate per-position CNY period P/L and return for the same selected period. Benchmark snapshots are written only during the holding price-refresh cycle, so benchmarks and holding prices use the same `price_refresh` run. The frontend benchmark comparison supports cumulative return, annualized return, and relative excess return; excess return is displayed as portfolio time-weighted cumulative return minus benchmark cumulative return.
 
-The market data provider refreshes quotes, FX, and benchmark ETFs. The Alpha Vantage provider uses `CURRENCY_EXCHANGE_RATE` for FX; if refresh fails, Prudentia keeps the last successful rate and marks it stale. Backend startup and background jobs check a daily TTL before refreshing, defaulting to 24 hours. `POST /api/portfolio/prices/refresh` remains available as an API/internal capability, but the current frontend does not show a refresh button.
+The market data provider refreshes quotes, FX, and benchmarks. `MARKET_DATA_PROVIDER` accepts a comma-separated fallback chain, such as `yahoo,tencent` or `longbridge,yahoo`; current providers are `mock`, `yahoo`, `tencent`, `longbridge`, and `alpha_vantage`. Yahoo and Tencent quotes do not require API keys; the Tencent provider handles stock quotes and the SSE Composite, and uses Yahoo currency-pair lookup as its FX adapter fallback; the Longbridge provider reads `LONGBRIDGE_APP_KEY`, `LONGBRIDGE_APP_SECRET`, and `LONGBRIDGE_ACCESS_TOKEN`; the Alpha Vantage provider uses `CURRENCY_EXCHANGE_RATE` for FX. `mock` is for offline development only and does not update holding or benchmark returns as available data. Backend startup and background jobs check a daily TTL before refreshing, defaulting to 24 hours. `POST /api/portfolio/prices/refresh` and the holdings-page manual refresh force one refresh, but still go through provider-level minimum request spacing, 429/rate-limit cooldowns, and fallback degradation. Tencent quote and Longbridge batch same-cycle holding/benchmark quote requests; Yahoo/Alpha Vantage remain per-symbol and are serialized by the throttling wrapper. If refresh fails, Prudentia keeps the last successful rate and marks it stale.
 
 ## Decisions
 

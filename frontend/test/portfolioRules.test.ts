@@ -7,6 +7,8 @@ import {
   emptyPortfolioDraftRow,
   ensureDraftRowClientIds,
   formatBaseMoney,
+  formatMoney,
+  formatReturnPercent,
   imageImportQueueCanStart,
   imageImportQueueRunningCount,
   marketOptionsForValue,
@@ -14,10 +16,13 @@ import {
   performanceChartRows,
   performanceChartYAxisDomain,
   portfolioDashboardPanelIds,
+  defaultPositionSortRule,
+  nextPositionSortRule,
   positionTableDisplayFields,
   portfolioImportFileKind,
   portfolioIssueLabel,
   positionEditDraft,
+  sortPositions,
   supportedCurrencies,
   updateDraftRowField
 } from "../src/pages/portfolioRules.ts";
@@ -62,12 +67,36 @@ test("position table display fields omit price freshness status", () => {
     "average_cost",
     "market_value",
     "unrealized_pnl",
+    "unrealized_pnl_pct",
+    "period_return_pct",
     "weight"
   ]);
 });
 
 test("portfolio dashboard panels stay focused on holdings only", () => {
   assert.deepEqual(portfolioDashboardPanelIds, ["positions"]);
+});
+
+test("positions sort by base market value by default and keep empty values last", () => {
+  const rows = [
+    position({ symbol: "AAA", market_value: 100, market_value_base: 700, unrealized_pnl: 10, unrealized_pnl_pct: 0.1, period_return_pct: null, weight: 0.1 }),
+    position({ symbol: "BBB", market_value: 300, market_value_base: 300, unrealized_pnl: -20, unrealized_pnl_pct: -0.2, period_return_pct: 0.05, weight: 0.3 }),
+    position({ symbol: "CCC", market_value: 200, market_value_base: 900, unrealized_pnl: 5, unrealized_pnl_pct: 0.025, period_return_pct: -0.1, weight: 0.2 })
+  ];
+
+  assert.deepEqual(sortPositions(rows, defaultPositionSortRule).map((row) => row.symbol), ["CCC", "AAA", "BBB"]);
+  assert.deepEqual(
+    sortPositions(rows, { field: "period_return_pct", direction: "asc" }).map((row) => row.symbol),
+    ["CCC", "BBB", "AAA"]
+  );
+  assert.deepEqual(nextPositionSortRule(defaultPositionSortRule, "market_value"), {
+    field: "market_value",
+    direction: "asc"
+  });
+  assert.deepEqual(nextPositionSortRule(defaultPositionSortRule, "unrealized_pnl"), {
+    field: "unrealized_pnl",
+    direction: "desc"
+  });
 });
 
 test("draft row client identity survives editable value changes", () => {
@@ -183,8 +212,15 @@ test("image import queue enforces a running limit", () => {
   assert.equal(imageImportQueueCanStart(tasks.slice(1), 2), true);
 });
 
-test("base money is formatted as cny", () => {
-  assert.equal(formatBaseMoney(summary({ total_market_value_base: 12345.67 })), "CN¥12,345.67");
+test("money values are formatted with iso currency prefixes", () => {
+  assert.equal(formatBaseMoney(summary({ total_market_value_base: 12345.67 })), "CNY 12,345.67");
+  assert.equal(formatMoney(12345.67, "HKD"), "HKD 12,345.67");
+  assert.equal(formatMoney(12345.67, "USD"), "USD 12,345.67");
+});
+
+test("return rates are formatted with two decimal places", () => {
+  assert.equal(formatReturnPercent(0.01234), "1.23%");
+  assert.equal(formatReturnPercent(-0.0004), "-0.04%");
 });
 
 test("position edit draft keeps editable fields as strings", () => {
@@ -201,7 +237,11 @@ test("position edit draft keeps editable fields as strings", () => {
     notes: null,
     last_price: 125,
     market_value: 250,
+    market_value_base: 1800,
     unrealized_pnl: 50,
+    unrealized_pnl_pct: 0.25,
+    period_profit_loss_base: null,
+    period_return_pct: null,
     weight: 0.2,
     price_updated_at: null,
     price_stale: false,
@@ -302,6 +342,33 @@ function draftRow(overrides: Partial<PortfolioDraftRow> = {}): PortfolioDraftRow
   };
 }
 
+function position(overrides: Partial<PortfolioPosition> = {}): PortfolioPosition {
+  return {
+    symbol: "AAPL",
+    name: "Apple",
+    asset_type: "stock",
+    quantity: 1,
+    average_cost: 100,
+    currency: "USD",
+    account: null,
+    market: "US",
+    sector: null,
+    notes: null,
+    last_price: 100,
+    market_value: 100,
+    market_value_base: 100,
+    unrealized_pnl: 0,
+    unrealized_pnl_pct: 0,
+    period_profit_loss_base: null,
+    period_return_pct: null,
+    weight: 0,
+    price_updated_at: null,
+    price_stale: false,
+    updated_at: "2026-01-01T00:00:00Z",
+    ...overrides
+  };
+}
+
 function imageTask(overrides: Partial<PortfolioImageImportTask> = {}): PortfolioImageImportTask {
   return {
     id: "first",
@@ -351,22 +418,29 @@ function performanceResponse(): PortfolioPerformanceResponse {
       start_value_base: 100,
       end_value_base: 110,
       profit_loss_base: 10,
+      net_cash_flow_base: 0,
       return_pct: 0.1,
-      annualized_return_pct: 1.2
+      simple_return_pct: 0.1,
+      annualized_return_pct: 1.2,
+      return_method: "time_weighted"
     },
     series: [
       {
         captured_at: "2026-01-01T00:00:00Z",
         value_base: 100,
         profit_loss_base: 0,
+        net_cash_flow_base: 0,
         return_pct: 0,
+        simple_return_pct: 0,
         annualized_return_pct: 0
       },
       {
         captured_at: "2026-02-01T00:00:00Z",
         value_base: 110,
         profit_loss_base: 10,
+        net_cash_flow_base: 0,
         return_pct: 0.1,
+        simple_return_pct: 0.1,
         annualized_return_pct: 1.2
       }
     ],

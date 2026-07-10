@@ -33,8 +33,14 @@ const MAX_IMAGE_IMPORT_BYTES: usize = 10 * 1024 * 1024;
 const BASE_CURRENCY: &str = "CNY";
 const TUSHARE_API_URL: &str = "http://api.tushare.pro";
 
+fn is_mock_market_data_source(source: &str) -> bool {
+    source.trim().eq_ignore_ascii_case("mock")
+}
+
 include!("types.rs");
 include!("performance.rs");
+include!("performance_returns.rs");
+include!("cash_flows.rs");
 include!("routes.rs");
 include!("import_workflows.rs");
 include!("symbol_directory.rs");

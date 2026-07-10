@@ -10,6 +10,7 @@ import type {
   PortfolioPerformancePeriod,
   PortfolioPerformanceResponse,
   PortfolioPosition,
+  PriceRefreshResult,
   PortfolioSummary,
   PortfolioDraftSymbolResolveResult,
   UpdateAiSettings,
@@ -35,6 +36,10 @@ async function request<T>(
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(body.error ?? "Request failed");
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return response.json() as Promise<T>;
@@ -66,10 +71,17 @@ export const api = {
     }),
   extractMemo: (id: string, languageTag?: string) =>
     request<MemoExtraction>(`/api/memos/${id}/ai/extract`, { method: "POST", languageTag }),
-  positions: () => request<PortfolioPosition[]>("/api/portfolio/positions"),
+  positions: (period?: PortfolioPerformancePeriod) =>
+    request<PortfolioPosition[]>(
+      period ? `/api/portfolio/positions?period=${encodeURIComponent(period)}` : "/api/portfolio/positions"
+    ),
   portfolioSummary: () => request<PortfolioSummary>("/api/portfolio/summary"),
   portfolioPerformance: (period: PortfolioPerformancePeriod) =>
     request<PortfolioPerformanceResponse>(`/api/portfolio/performance?period=${encodeURIComponent(period)}`),
+  refreshPortfolioPrices: () =>
+    request<PriceRefreshResult>("/api/portfolio/prices/refresh", {
+      method: "POST"
+    }),
   previewPortfolioImport: (payload: FilePayload) =>
     request<PortfolioImportPreview>("/api/portfolio/import/preview", {
       method: "POST",

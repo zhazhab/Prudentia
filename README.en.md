@@ -20,7 +20,7 @@ In the ideal state, users can build their own investment system in Prudentia and
 
 - Rust backend with `axum`, `sqlx`, SQLite, provider-based AI, and provider-based market data.
 - React + Vite + TypeScript frontend with Portfolio, Memos, and Settings views.
-- Portfolio CSV/Excel/screenshot unified draft import, field mapping, local code-directory matching, confirmed merge commit, position edit/delete, value/weight/P/L calculations, CNY base summary, snapshot performance views, index-proxy comparison, and daily-TTL quote/FX refresh.
+- Portfolio CSV/Excel/screenshot unified draft import, field mapping, local code-directory matching, confirmed merge commit, position edit/delete, value/weight/P/L and return-rate calculations, holdings-table sorting, automatic trade adjustments, CNY base summary, holding snapshot returns and portfolio time-weighted return views, index-proxy comparison, ISO currency money display, and daily-TTL/manual forced quote and FX refresh.
 - Memo workflow for creating notes and using AI extraction for thesis, risks, catalysts, disconfirming evidence, and checklist items.
 - AI Settings page for Mock, OpenAI-compatible, and CLI providers, saved to the local `.env`.
 - English and Simplified Chinese UI, with `Accept-Language` passed to backend-generated system text.
@@ -84,9 +84,41 @@ Useful commands:
 npm --prefix frontend run build
 ```
 
+## Local Config And Data
+
+The backend reads local `.env` and SQLite state from the original repository working tree behind the Git common dir by default, so launching from different git worktrees reads and writes the same original-repo configuration and portfolio data. Relative SQLite URLs such as `DATABASE_URL=sqlite://data/prudentia.sqlite` resolve relative to the original repository working tree instead of the current worktree.
+
+To override the local state directory:
+
+```env
+PRUDENTIA_LOCAL_DIR=.prudentia-local
+DATABASE_URL=sqlite://data/prudentia.sqlite
+```
+
+When the AI Settings page persists settings locally, it also writes to this shared `.env`.
+
 ## Provider Defaults
 
-`AI_PROVIDER=mock` and `MARKET_DATA_PROVIDER=mock` make the app runnable without external API keys.
+`AI_PROVIDER=mock` and `MARKET_DATA_PROVIDER=mock` make the app runnable without external API keys; mock quotes are for offline development and do not update real holding or benchmark returns.
+
+`MARKET_DATA_PROVIDER` accepts a comma-separated fallback chain. Supported entries are `mock`, `yahoo`, `tencent`, `longbridge`, and `alpha_vantage`. Yahoo and Tencent quotes do not require API keys:
+
+```env
+MARKET_DATA_PROVIDER=yahoo,tencent
+PRICE_REFRESH_TTL_SECS=86400
+```
+
+To use Longbridge OpenAPI quotes:
+
+```env
+MARKET_DATA_PROVIDER=longbridge,yahoo
+LONGBRIDGE_APP_KEY=your_app_key
+LONGBRIDGE_APP_SECRET=your_app_secret
+LONGBRIDGE_ACCESS_TOKEN=your_access_token
+PRICE_REFRESH_TTL_SECS=86400
+```
+
+Longbridge credentials are read from environment variables by the official SDK. `LONGBRIDGE_ACCESS_TOKEN` may carry account or trading permissions, so keep it in your local `.env` and do not commit it.
 
 To use Alpha Vantage-compatible quote refreshes:
 
@@ -96,7 +128,7 @@ ALPHA_VANTAGE_API_KEY=your_key
 PRICE_REFRESH_TTL_SECS=86400
 ```
 
-Quotes, FX, and benchmark ETF proxies refresh automatically with a 24-hour TTL by default. The frontend does not expose a manual refresh button and only reads local API data; refresh failures keep stale state and log warnings without blocking startup.
+Quotes, FX, and benchmark indexes refresh automatically with a 24-hour TTL by default, and the holdings page can trigger one manual forced refresh. Forced refreshes bypass the daily TTL, but still go through provider-level throttling, 429/rate-limit cooldowns, and the fallback chain; Tencent quote and Longbridge providers batch same-cycle holding/benchmark quote requests. Refresh failures keep stale state and log warnings without blocking startup.
 
 The local security code directory uses the no-account public provider by default for screenshot or draft name-to-`symbol` matching:
 
