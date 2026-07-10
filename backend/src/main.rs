@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let app = startup::build_router(pool, ai_provider, market_provider);
+    let app = startup::build_router_with_config(pool, ai_provider, market_provider, &config);
     let addr: SocketAddr = config.bind_addr.parse()?;
     let listener = TcpListener::bind(addr).await?;
 

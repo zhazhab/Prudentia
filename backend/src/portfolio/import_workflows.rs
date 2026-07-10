@@ -184,6 +184,7 @@ pub async fn commit_import(
     }
 
     recompute_weights_with_fx(pool, market_data.clone()).await?;
+    record_current_position_baselines(pool, "import_commit").await?;
     record_portfolio_performance_snapshot(pool, market_data, "import_commit").await?;
 
     Ok(PortfolioImportResult {
@@ -296,6 +297,7 @@ async fn commit_draft_rows_with_symbol_resolver(
     }
 
     recompute_weights_with_fx(pool, market_data.clone()).await?;
+    record_current_position_baselines(pool, "draft_commit").await?;
     record_portfolio_performance_snapshot(pool, market_data, "draft_commit").await?;
 
     Ok(PortfolioImportResult {

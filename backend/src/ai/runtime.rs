@@ -5,11 +5,13 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use crate::{
     ai::{
         cli::{CliProviderKind, CliSettings},
-        provider_from_settings, AiError, InvestmentSystemRefinement, MemoExtraction,
+        provider_for_kind, provider_from_settings, AiError, AiProviderEvent, ConversationContext,
+        ConversationProjection, InvestmentSystemRefinement, MemoChatContext, MemoExtraction,
         PortfolioImageRecognition, PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput,
         StockSnapshotContext,
     },
@@ -57,6 +59,7 @@ impl AiProviderKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiSettings {
     pub provider: AiProviderKind,
+    pub provider_chain: Vec<AiProviderKind>,
     pub openai_api_key: Option<String>,
     pub openai_base_url: String,
     pub openai_model: String,
@@ -66,6 +69,7 @@ pub struct AiSettings {
 #[derive(Debug, Clone, Serialize)]
 pub struct AiSettingsResponse {
     pub provider: String,
+    pub provider_chain: Vec<String>,
     pub openai_base_url: String,
     pub openai_model: String,
     pub has_openai_api_key: bool,
@@ -98,7 +102,10 @@ impl AiRuntime {
     }
 
     pub fn from_config(config: &AppConfig) -> Self {
-        Self::new(AiSettings::from_config(config), ".env")
+        Self::new(
+            AiSettings::from_config(config),
+            crate::config::LocalAppPaths::discover().env_path,
+        )
     }
 
     pub fn from_config_with_env_path(config: &AppConfig, env_path: impl Into<PathBuf>) -> Self {
@@ -120,7 +127,8 @@ impl AiRuntime {
         let mut settings = self.settings.write().expect("ai settings lock poisoned");
 
         if let Some(provider) = request.provider.and_then(clean_option) {
-            settings.provider = AiProviderKind::parse(&provider)?;
+            settings.provider_chain = parse_provider_chain(&provider)?;
+            settings.provider = settings.provider_chain[0];
             if provider.eq_ignore_ascii_case("codex") || provider.eq_ignore_ascii_case("codex_cli")
             {
                 settings.cli.provider = CliProviderKind::Codex;
@@ -156,6 +164,102 @@ impl AiRuntime {
         }
 
         Ok(settings.to_response())
+    }
+
+    pub async fn respond_to_memo_chat(
+        &self,
+        context: &MemoChatContext,
+        locale: Locale,
+    ) -> Result<String, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        provider_from_settings(&settings)
+            .respond_to_memo_chat(context, locale)
+            .await
+    }
+
+    pub async fn respond_to_conversation(
+        &self,
+        context: &ConversationContext,
+        locale: Locale,
+        events: mpsc::UnboundedSender<AiProviderEvent>,
+    ) -> Result<String, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        let mut last_error = None;
+        for (index, kind) in settings.provider_chain.iter().copied().enumerate() {
+            let provider = provider_for_kind(&settings, kind);
+            let (provider_tx, mut provider_rx) = mpsc::unbounded_channel();
+            let response = provider.respond_to_conversation(context, locale, provider_tx);
+            tokio::pin!(response);
+            let mut content_started = false;
+            let result = loop {
+                tokio::select! {
+                    event = provider_rx.recv() => {
+                        let Some(event) = event else {
+                            break response.await;
+                        };
+                        if matches!(event, AiProviderEvent::TextDelta(_)) {
+                            content_started = true;
+                        }
+                        let _ = events.send(event);
+                    }
+                    result = &mut response => break result,
+                }
+            };
+            while let Ok(event) = provider_rx.try_recv() {
+                if matches!(event, AiProviderEvent::TextDelta(_)) {
+                    content_started = true;
+                }
+                let _ = events.send(event);
+            }
+            match result {
+                Ok(response) => return Ok(response),
+                Err(error) if !content_started && index + 1 < settings.provider_chain.len() => {
+                    last_error = Some(error);
+                    let _ = events.send(AiProviderEvent::Stage {
+                        provider: kind.as_str().to_string(),
+                        stage: "provider_fallback".to_string(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| AiError::Provider("no AI provider is configured".to_string())))
+    }
+
+    pub async fn project_conversation(
+        &self,
+        context: &ConversationContext,
+        assistant_response: &str,
+        locale: Locale,
+    ) -> Result<ConversationProjection, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        let mut errors = Vec::new();
+        for kind in &settings.provider_chain {
+            match provider_for_kind(&settings, *kind)
+                .project_conversation(context, assistant_response, locale)
+                .await
+            {
+                Ok(projection) => return Ok(projection),
+                Err(error) => errors.push(format!("{}: {error}", kind.as_str())),
+            }
+        }
+        Err(AiError::Provider(format!(
+            "all configured AI providers failed to project the turn: {}",
+            errors.join("; ")
+        )))
     }
 
     pub async fn extract_memo(
@@ -250,8 +354,11 @@ impl AiRuntime {
 
 impl AiSettings {
     pub fn from_config(config: &AppConfig) -> Self {
+        let provider_chain =
+            parse_provider_chain(&config.ai_provider).unwrap_or_else(|_| vec![AiProviderKind::Cli]);
         Self {
-            provider: AiProviderKind::parse(&config.ai_provider).unwrap_or(AiProviderKind::Mock),
+            provider: provider_chain[0],
+            provider_chain,
             openai_api_key: config.openai_api_key.clone(),
             openai_base_url: config.openai_base_url.clone(),
             openai_model: config.openai_model.clone(),
@@ -268,6 +375,11 @@ impl AiSettings {
     pub fn to_response(&self) -> AiSettingsResponse {
         AiSettingsResponse {
             provider: self.provider.as_str().to_string(),
+            provider_chain: self
+                .provider_chain
+                .iter()
+                .map(|provider| provider.as_str().to_string())
+                .collect(),
             openai_base_url: self.openai_base_url.clone(),
             openai_model: self.openai_model.clone(),
             has_openai_api_key: self.openai_api_key.is_some(),
@@ -281,14 +393,30 @@ impl AiSettings {
 }
 
 fn write_env_file(path: &Path, settings: &AiSettings) -> Result<(), AiError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| AiError::Provider(format!("failed to create .env directory: {err}")))?;
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            AiError::Provider(format!(
+                "failed to create config directory {}: {err}",
+                parent.display()
+            ))
+        })?;
     }
     let current = fs::read_to_string(path).unwrap_or_default();
     let mut lines = current.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
 
-    set_env_line(&mut lines, "AI_PROVIDER", settings.provider.as_str());
+    set_env_line(
+        &mut lines,
+        "AI_PROVIDER",
+        &settings
+            .provider_chain
+            .iter()
+            .map(|provider| provider.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
     set_env_line(
         &mut lines,
         "OPENAI_API_KEY",
@@ -313,8 +441,12 @@ fn write_env_file(path: &Path, settings: &AiSettings) -> Result<(), AiError> {
         settings.cli.profile.as_deref().unwrap_or_default(),
     );
 
-    fs::write(path, format!("{}\n", lines.join("\n")))
-        .map_err(|err| AiError::Provider(format!("failed to write .env: {err}")))?;
+    fs::write(path, format!("{}\n", lines.join("\n"))).map_err(|err| {
+        AiError::Provider(format!(
+            "failed to write config file {}: {err}",
+            path.display()
+        ))
+    })?;
 
     Ok(())
 }
@@ -348,4 +480,18 @@ fn clean_option(value: String) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn parse_provider_chain(value: &str) -> Result<Vec<AiProviderKind>, AiError> {
+    let mut providers = value
+        .split(',')
+        .map(AiProviderKind::parse)
+        .collect::<Result<Vec<_>, _>>()?;
+    providers.dedup();
+    if providers.is_empty() {
+        return Err(AiError::Provider(
+            "at least one AI provider is required".to_string(),
+        ));
+    }
+    Ok(providers)
 }

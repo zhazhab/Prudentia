@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod ai_ws;
 pub mod config;
+pub mod conversation;
 pub mod database;
 pub mod decision;
 pub mod decision_delta;
@@ -9,6 +10,7 @@ pub mod investment_system;
 pub mod locale;
 pub mod market_data;
 pub mod memo;
+pub mod memo_thread;
 pub mod portfolio;
 pub mod profile;
 pub mod research;

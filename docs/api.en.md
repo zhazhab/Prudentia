@@ -28,11 +28,75 @@ Base URL: `http://127.0.0.1:8080`
 }
 ```
 
+## Conversation
+
+The home uses a dedicated durable conversation protocol. Legacy `/api/memo-threads` and `/api/ai/ws` remain only for existing memo and portfolio-screenshot compatibility flows.
+
+- `POST /api/conversation/runs`
+- `GET /api/conversation/runs/active`
+- `POST /api/conversation/runs/{id}/cancel`
+- `POST /api/conversation/runs/{id}/retry`
+- `GET /api/conversation/events/ws?after_event_id={cursor}`
+- `GET /api/conversation/threads`
+- `GET /api/conversation/threads/{id}?message_limit=50&before_message_id={id}`
+- `POST /api/conversation/threads/{id}/archive`
+- `DELETE /api/conversation/threads/{id}`
+- `PATCH /api/conversation/threads/{id}/subject`
+- `GET /api/conversation/companies/{symbol}/views`
+- `POST /api/conversation/companies/{symbol}/views/{version}/rollback`
+- `POST /api/conversation/attachments`
+- `PATCH /api/conversation/actions/{id}`
+- `POST /api/conversation/actions/{id}/confirm`
+- `POST /api/conversation/actions/{id}/reject`
+
+Run creation atomically creates or reuses a thread, persists the user message, and creates the run record. `client_request_id` is the idempotency key; new threads use a temporary `client_thread_id`, while existing threads send `thread_id`:
+
+```json
+{
+  "client_request_id": "conversation-1",
+  "client_thread_id": "client-local-1",
+  "content": "Does Tencent's advertising recovery change the thesis?",
+  "attachment_ids": ["attachment-id"],
+  "locale": "en-US"
+}
+```
+
+A thread can have at most one `queued`/`running` task, while different threads can run concurrently. Phases are `queued`, `resolving_subject`, `loading_context`, `researching`, `generating`, `extracting_actions`, and `persisting`; terminal states are `completed`, `failed`, `canceled`, and `interrupted`. Cancel terminates the real provider process, retry starts from the original user message, and backend startup marks any abandoned active run as `interrupted`.
+
+The event WebSocket only subscribes to persisted events and does not own task lifetime. Each event has a monotonically increasing `event_id`, `run_id`, `thread_id`, `event_type`, `payload`, and `created_at`. Clients pass the last handled sequence in `after_event_id`; the server replays first and then keeps streaming. Common events are `run.accepted`, `run.phase`, `message.delta`, `message.completed`, `source.added`, `action.proposed`, `action.updated`, `run.warning`, and run terminal events. OpenAI-compatible providers emit real SSE token deltas. A CLI provider without token deltas emits phases only and persists the body once at completion instead of faking chunked streaming.
+
+Thread detail returns `thread.subject`, the active run, `latest_run`, paginated messages, confirmation actions, and the current company view. Subjects are restricted to `company`, `investment_system`, `psychology`, and `general`. Subject correction example:
+
+```json
+{
+  "kind": "company",
+  "subject_key": "0700.HK",
+  "label": "Tencent"
+}
+```
+
+Attachment requests accept either a base64 file or a link. Images, PDF, text, Markdown, CSV/TSV, and XLSX are parsed when supported; unsupported files are still stored with an explicit `parse_status` and are never silently treated as read. Originals are content-hash deduplicated under shared `data/workspace`, while responses and the database use relative paths:
+
+```json
+{
+  "file_name": "earnings.pdf",
+  "mime_type": "application/pdf",
+  "content_encoding": "base64",
+  "content": "..."
+}
+```
+
+The model can only propose `company_view_patch`, `trade_record`, and `rule_graph_patch` actions. Edit with `{"payload": {...}}`; confirm with `{"expected_version": 3}`. Each action is edited, confirmed, rejected, or failed independently, and target versions plus idempotent execution state prevent duplicate writes. Company views create immutable section-level versions and a Markdown projection. Trades run through deterministic historical-FX, baseline, cost-basis, oversell, and TWR cash-flow checks. A rule patch activates only after DAG, port, configuration, JSON Schema, and adapter-availability validation.
+
+Company history is returned newest-version first. A rollback request such as `{"expected_version": 4}` never overwrites history; it copies the target version into a new v5. A current-version mismatch rejects the operation to prevent duplicate rollback or concurrent overwrite.
+
 ## Investment System
 
-- `GET /api/investment-system/`
-- `PATCH /api/investment-system/`
-- `POST /api/investment-system/ai/refine`
+- `GET /api/investment-system/graph`
+- `POST /api/investment-system/graph/evaluate`
+- `GET /api/investment-system/legacy`
+
+The active investment system is a versioned DAG. Node kinds are `fixed`, `skill`, and `agent`; the fixed execution kernel supports input, numeric comparison, range, Boolean composition, and output nodes, and evaluation returns both output and node traces. New versions are created and atomically activated only by a confirmed `rule_graph_patch`. `legacy` returns the read-only migration snapshot of the prior natural-language system, which does not participate in execution. The old root and AI-refine paths remain compatibility code, not the home write path.
 
 ## Research
 
@@ -226,14 +290,16 @@ Holding returns use the common broker holdings-page convention: native market va
 
 `GET /api/portfolio/cash-flows` returns system-recorded trade adjustments in the selected period. Import confirmation, draft confirmation, position edits, and position deletes record a `buy` or `sell` adjustment when the CNY portfolio value changes; quote refreshes never create trade adjustments. Trade adjustments only affect portfolio-level return calculations and do not change per-holding cost basis or unrealized P/L.
 
+A confirmed conversation `trade_record` executes through the internal ledger and has no public write route that bypasses its confirmation card. Import/manual holdings are per-security baselines. Post-baseline buys include fees in weighted cost, sells preserve remaining average cost and reject overselling, and buys/sells create TWR inflow/outflow records. Trades before the baseline are history only. Non-CNY trades require execution-date historical FX plus source; corrections use reversal and replacement events.
+
 `GET /api/portfolio/performance` returns portfolio performance. `period` accepts `month`, `year`, and `since_inception`; month/year boundaries use Asia/Shanghai calendar periods. The response includes:
 
 - `portfolio`: period start/end CNY value, amount P/L after net trade adjustments `end_value_base - start_value_base - net_cash_flow_base`, trade-adjusted time-weighted return `return_pct`, unadjusted snapshot return `simple_return_pct`, net trade adjustment `net_cash_flow_base`, annualized return `annualized_return_pct`, and `return_method = "time_weighted"`.
 - `partial_period`: `true` when no snapshot exists at the period start, so clients can display "since YYYY-MM-DD".
 - `series`: portfolio snapshot series with cumulative net trade adjustment, amount P/L after net trade adjustments, time-weighted cumulative return, unadjusted snapshot return, and annualized return when computable.
-- `benchmarks`: S&P ETF proxy `SPY`, Hang Seng ETF proxy `2800.HK`, and the official SSE Composite `000001.SS` over the same period, with cumulative and annualized returns. Quote failures mark a benchmark unavailable/stale without blocking portfolio performance.
+- `benchmarks`: S&P ETF proxy `SPY`, Hang Seng ETF proxy `2800.HK`, and the official SSE Composite `000001.SS` over the same period, with cumulative return, annualized return, and the latest quote `source`. Quote failures mark a benchmark unavailable/stale without blocking portfolio performance.
 
-Performance uses portfolio value snapshots and automatic trade adjustments to calculate time-weighted return. Each snapshot interval uses `(ending value - interval net trade adjustment) / starting value - 1`, then compounds the interval returns. Draft confirmation, edit, delete, and daily quote refreshes all write portfolio snapshots and current position snapshots; `GET /api/portfolio/positions?period=...` uses position snapshots to calculate per-position CNY period P/L and return for the same selected period. Benchmark snapshots are written only during the holding price-refresh cycle, so benchmarks and holding prices use the same `price_refresh` run. The frontend benchmark comparison supports cumulative return, annualized return, and relative excess return; excess return is displayed as portfolio time-weighted cumulative return minus benchmark cumulative return.
+Performance uses portfolio value snapshots and automatic trade adjustments to calculate time-weighted return. Each snapshot interval uses `(ending value - interval net trade adjustment) / starting value - 1`, then compounds the interval returns. Deleting down to an empty portfolio becomes the new starting boundary for later reads, so cleanup followed by reimport is not counted as investment return. Draft confirmation, edit, delete, and daily quote refreshes all write portfolio snapshots and current position snapshots; `GET /api/portfolio/positions?period=...` uses position snapshots to calculate per-position CNY period P/L and return for the same selected period. Benchmark snapshots are written only during the holding price-refresh cycle, so benchmarks and holding prices use the same `price_refresh` run. The frontend benchmark comparison supports cumulative return, annualized return, and relative excess return; excess return is displayed as portfolio time-weighted cumulative return minus benchmark cumulative return.
 
 The market data provider refreshes quotes, FX, and benchmarks. `MARKET_DATA_PROVIDER` accepts a comma-separated fallback chain, such as `yahoo,tencent` or `longbridge,yahoo`; current providers are `mock`, `yahoo`, `tencent`, `longbridge`, and `alpha_vantage`. Yahoo and Tencent quotes do not require API keys; the Tencent provider handles stock quotes and the SSE Composite, and uses Yahoo currency-pair lookup as its FX adapter fallback; the Longbridge provider reads `LONGBRIDGE_APP_KEY`, `LONGBRIDGE_APP_SECRET`, and `LONGBRIDGE_ACCESS_TOKEN`; the Alpha Vantage provider uses `CURRENCY_EXCHANGE_RATE` for FX. `mock` is for offline development only and does not update holding or benchmark returns as available data. Backend startup and background jobs check a daily TTL before refreshing, defaulting to 24 hours. `POST /api/portfolio/prices/refresh` and the holdings-page manual refresh force one refresh, but still go through provider-level minimum request spacing, 429/rate-limit cooldowns, and fallback degradation. Tencent quote and Longbridge batch same-cycle holding/benchmark quote requests; Yahoo/Alpha Vantage remain per-symbol and are serialized by the throttling wrapper. If refresh fails, Prudentia keeps the last successful rate and marks it stale.
 
@@ -323,7 +389,7 @@ The profile is calculated from memos, decisions, decision delta reviews, and por
 - `GET /api/settings/ai`
 - `PATCH /api/settings/ai`
 
-`PATCH /api/settings/ai` accepts runtime AI provider settings. Set `persist_to_env` to `true` to write the selected values to `.env`.
+`PATCH /api/settings/ai` accepts runtime AI provider settings. Set `persist_to_env` to `true` to write the selected values to the shared `.env` in the original repository working tree behind the Git common dir; `PRUDENTIA_LOCAL_DIR` can override that directory.
 
 ```json
 {

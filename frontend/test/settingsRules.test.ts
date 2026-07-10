@@ -3,13 +3,14 @@ import test from "node:test";
 import { aiSettingsPayload, providerMode } from "../src/pages/settingsRules.ts";
 import type { UpdateAiSettings } from "../src/types/domain.ts";
 
-test("provider mode falls back to mock for unknown values", () => {
+test("provider mode defaults unknown values to the real CLI provider", () => {
   assert.equal(providerMode("mock"), "mock");
   assert.equal(providerMode("openai"), "openai");
   assert.equal(providerMode("cli"), "cli");
   assert.equal(providerMode("codex"), "cli");
   assert.equal(providerMode("codex_cli"), "cli");
-  assert.equal(providerMode("unknown"), "mock");
+  assert.equal(providerMode("unknown"), "cli");
+  assert.equal(providerMode(undefined), "cli");
 });
 
 test("mock settings persist locally without unrelated provider fields", () => {

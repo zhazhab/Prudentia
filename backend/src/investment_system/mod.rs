@@ -15,6 +15,12 @@ use crate::{
     time::now_iso,
 };
 
+mod rule_graph;
+pub use rule_graph::{
+    activate_rule_graph, active_rule_graph, evaluate_active_rule_graph, legacy_system, RuleEdge,
+    RuleEvaluation, RuleGraph, RuleGraphPatch, RuleGraphVersion, RuleNode, RuleNodeAdapter,
+};
+
 const DEFAULT_SYSTEM_ID: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +44,26 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(get_system).patch(update_system))
         .route("/ai/refine", post(refine_system))
+        .route("/graph", get(get_rule_graph))
+        .route("/graph/evaluate", post(evaluate_rule_graph))
+        .route("/legacy", get(get_legacy_system))
+}
+
+async fn get_rule_graph(State(state): State<AppState>) -> AppResult<Json<RuleGraphVersion>> {
+    Ok(Json(active_rule_graph(&state.pool).await?))
+}
+
+async fn evaluate_rule_graph(
+    State(state): State<AppState>,
+    Json(input): Json<serde_json::Value>,
+) -> AppResult<Json<RuleEvaluation>> {
+    Ok(Json(evaluate_active_rule_graph(&state.pool, input).await?))
+}
+
+async fn get_legacy_system(
+    State(state): State<AppState>,
+) -> AppResult<Json<Option<serde_json::Value>>> {
+    Ok(Json(legacy_system(&state.pool).await?))
 }
 
 async fn get_system(

@@ -279,6 +279,7 @@ pub struct BenchmarkPerformance {
     pub return_pct: Option<f64>,
     pub annualized_return_pct: Option<f64>,
     pub error: Option<String>,
+    pub source: Option<String>,
     pub series: Vec<BenchmarkPerformancePoint>,
 }
 
@@ -290,6 +291,7 @@ pub struct BenchmarkPerformancePoint {
     pub annualized_return_pct: Option<f64>,
     pub stale: bool,
     pub error: Option<String>,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-Prudentia is a local-first investment workspace. The current frontend focuses on thesis-driven memos, portfolio holdings/import visibility, and local AI provider configuration.
+Prudentia is a local-first investment workspace. The current frontend opens on a chat-first investment memo home and focuses on portfolio holdings/import visibility, memo management, and local AI provider configuration.
 
 ## Repository Name
 
@@ -19,10 +19,11 @@ In the ideal state, users can build their own investment system in Prudentia and
 ## Current Capabilities
 
 - Rust backend with `axum`, `sqlx`, SQLite, provider-based AI, and provider-based market data.
-- React + Vite + TypeScript frontend with Portfolio, Memos, and Settings views.
+- React + Vite + TypeScript frontend with a chat-first home, Portfolio, Memos, and Settings views.
+- Chat-first home with natural replies from real AI providers, replayable persisted run events, one send/stop control, attachments and research sources, independently confirmable data actions, and portfolio/company/used-context side panels; threads and context become drawers on mobile.
 - Portfolio CSV/Excel/screenshot unified draft import, field mapping, local code-directory matching, confirmed merge commit, position edit/delete, value/weight/P/L and return-rate calculations, holdings-table sorting, automatic trade adjustments, CNY base summary, holding snapshot returns and portfolio time-weighted return views, index-proxy comparison, ISO currency money display, and daily-TTL/manual forced quote and FX refresh.
 - Memo workflow for creating notes and using AI extraction for thesis, risks, catalysts, disconfirming evidence, and checklist items.
-- AI Settings page for Mock, OpenAI-compatible, and CLI providers, saved to the local `.env`.
+- AI Settings page for explicit Mock, OpenAI-compatible, and CLI providers; Codex CLI is the default, ordered fallback chains only switch before visible text is emitted, and settings are saved to the original repository working tree's shared `.env`.
 - English and Simplified Chinese UI, with `Accept-Language` passed to backend-generated system text.
 
 ## Planned Capabilities
@@ -157,7 +158,7 @@ OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_MODEL=gpt-4.1-mini
 ```
 
-To use the generic CLI provider with Codex CLI and ChatGPT/device-code authentication:
+OpenAI-compatible conversations use real SSE token streaming. To use the generic CLI provider with Codex CLI and ChatGPT/device-code authentication:
 
 ```sh
 codex login --device-auth
@@ -173,7 +174,18 @@ AI_CLI_MODEL=
 AI_CLI_PROFILE=
 ```
 
-You can also edit AI settings from the app Settings page. Saving applies changes immediately and writes them to the local `.env` so they persist across backend restarts.
+`AI_PROVIDER` may be an ordered fallback chain such as `cli,openai`. A provider can only fall back before it emits visible response text, and the runtime never falls back to mock automatically. Greetings and ordinary questions also go through the configured real provider instead of hardcoded replies.
+
+Optionally enable Tavily research:
+
+```env
+WEB_RESEARCH_PROVIDER=tavily
+TAVILY_API_KEY=your_key
+```
+
+Use `WEB_RESEARCH_PROVIDER=disabled` when it is not configured. Unavailable external search does not block local-context conversation, but the response is marked as not externally verified. Conversation attachments, company Markdown projections, and SQLite use the original repository's shared local root; the database stores relative paths so all worktrees read and write the same local material.
+
+You can also edit AI settings from the app Settings page. Saving applies changes immediately and writes them to the shared `.env` in the original repository working tree, so the settings persist across backend restarts and new worktrees.
 
 ## Import Template
 

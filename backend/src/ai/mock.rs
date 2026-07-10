@@ -1,10 +1,12 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioReviewContext,
+        AiError, AiProvider, AiProviderEvent, ConversationContext, ConversationProjection,
+        InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioReviewContext,
         ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
@@ -17,6 +19,57 @@ pub struct MockAiProvider;
 
 #[async_trait]
 impl AiProvider for MockAiProvider {
+    async fn respond_to_conversation(
+        &self,
+        context: &ConversationContext,
+        locale: Locale,
+        events: mpsc::UnboundedSender<AiProviderEvent>,
+    ) -> Result<String, AiError> {
+        let message = first_sentence(context.user_message.trim());
+        let response = if locale.is_zh() {
+            format!("我听到了：{message}。我们可以继续把事实、判断、风险和待验证问题分开讨论。")
+        } else {
+            format!("I heard: {message}. We can separate facts, judgments, risks, and open questions as we continue.")
+        };
+        let _ = events.send(AiProviderEvent::Stage {
+            provider: "mock".to_string(),
+            stage: "generating".to_string(),
+        });
+        let _ = events.send(AiProviderEvent::TextDelta(response.clone()));
+        Ok(response)
+    }
+
+    async fn project_conversation(
+        &self,
+        context: &ConversationContext,
+        _assistant_response: &str,
+        _locale: Locale,
+    ) -> Result<ConversationProjection, AiError> {
+        Ok(ConversationProjection {
+            summary: first_sentence(&context.user_message),
+            actions: Vec::new(),
+        })
+    }
+
+    async fn respond_to_memo_chat(
+        &self,
+        context: &MemoChatContext,
+        locale: Locale,
+    ) -> Result<String, AiError> {
+        let message = first_sentence(context.user_message.trim());
+        if locale.is_zh() {
+            Ok(format!(
+                "我听到了：{}。我们可以先把问题拆成假设、证据、风险和需要继续验证的点。",
+                message
+            ))
+        } else {
+            Ok(format!(
+                "I heard: {}. We can break this into hypothesis, evidence, risks, and open checks.",
+                message
+            ))
+        }
+    }
+
     async fn extract_memo(&self, memo: &Memo, locale: Locale) -> Result<MemoExtraction, AiError> {
         let fallback = if memo.notes.trim().is_empty() {
             if locale.is_zh() {

@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     ai::runtime::AiRuntime,
     error::{AppError, AppResult},
-    market_data::MarketDataProvider,
+    market_data::{ExchangeRate, MarketDataProvider},
     state::AppState,
     time::now_iso,
 };
@@ -39,14 +39,17 @@ fn is_mock_market_data_source(source: &str) -> bool {
 
 include!("types.rs");
 include!("performance.rs");
+include!("performance_window.rs");
 include!("performance_returns.rs");
 include!("cash_flows.rs");
+include!("trades.rs");
 include!("routes.rs");
 include!("import_workflows.rs");
 include!("symbol_directory.rs");
 include!("public_symbol_directory.rs");
 include!("symbol_resolution.rs");
 include!("positions.rs");
+include!("position_fx.rs");
 include!("draft_processing.rs");
 include!("draft_image.rs");
 include!("tests.rs");

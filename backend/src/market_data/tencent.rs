@@ -5,7 +5,8 @@ use reqwest::Client;
 
 use crate::{
     market_data::{
-        yahoo::yahoo_exchange_rate, ExchangeRate, MarketDataError, MarketDataProvider, MarketQuote,
+        yahoo::{yahoo_exchange_rate, yahoo_exchange_rate_at},
+        ExchangeRate, MarketDataError, MarketDataProvider, MarketQuote,
     },
     time::now_iso,
 };
@@ -143,6 +144,22 @@ impl MarketDataProvider for TencentMarketDataProvider {
         to_currency: &str,
     ) -> Result<ExchangeRate, MarketDataError> {
         yahoo_exchange_rate(&self.client, from_currency, to_currency, "tencent:yahoo_fx").await
+    }
+
+    async fn exchange_rate_at(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+        rate_date: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        yahoo_exchange_rate_at(
+            &self.client,
+            from_currency,
+            to_currency,
+            rate_date,
+            "tencent:yahoo_historical_fx",
+        )
+        .await
     }
 }
 

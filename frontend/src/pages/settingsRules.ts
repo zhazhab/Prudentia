@@ -12,7 +12,7 @@ export function providerMode(provider: string | null | undefined): AiProviderMod
     return "cli";
   }
 
-  return "mock";
+  return normalized === "mock" ? "mock" : "cli";
 }
 
 export function aiSettingsPayload(draft: UpdateAiSettings): UpdateAiSettings {

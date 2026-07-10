@@ -14,12 +14,15 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::{sync::mpsc, task::JoinHandle};
 
+mod memo_chat;
+use memo_chat::{MemoChatContextHints, MemoChatStartRequest, MemoChatUserMessage};
+
 use crate::{
     portfolio::{self, PortfolioImageImportPreviewRequest},
     state::AppState,
 };
 
-const MAX_ACTIVE_TASKS_PER_CONNECTION: usize = 2;
+pub(super) const MAX_ACTIVE_TASKS_PER_CONNECTION: usize = 2;
 const PORTFOLIO_IMAGE_IMPORT_ARTIFACT: &str = "portfolio_image_import.preview";
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -31,6 +34,15 @@ pub enum AiWsClientMessage {
         request_id: String,
         payload: PortfolioImageImportPreviewRequest,
     },
+    #[serde(rename = "memo_chat.start")]
+    MemoChatStart {
+        request_id: String,
+        thread_id: Option<String>,
+        client_thread_id: Option<String>,
+        locale: Option<String>,
+        message: MemoChatUserMessage,
+        context_hints: Option<MemoChatContextHints>,
+    },
     #[serde(rename = "cancel")]
     Cancel { request_id: String },
 }
@@ -39,26 +51,59 @@ pub enum AiWsClientMessage {
 #[serde(tag = "type")]
 pub enum AiWsServerMessage {
     #[serde(rename = "accepted")]
-    Accepted { request_id: String },
+    Accepted {
+        request_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "progress")]
     Progress { request_id: String, stage: String },
+    #[serde(rename = "delta")]
+    Delta {
+        request_id: String,
+        thread_id: String,
+        content: String,
+    },
+    #[serde(rename = "artifact")]
+    Artifact {
+        request_id: String,
+        thread_id: String,
+        artifact_type: String,
+        data: serde_json::Value,
+    },
     #[serde(rename = "completed")]
     Completed {
         request_id: String,
         artifact_type: String,
         data: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u128>,
     },
     #[serde(rename = "failed")]
     Failed {
         request_id: String,
         code: String,
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u128>,
     },
     #[serde(rename = "canceled")]
-    Canceled { request_id: String },
+    Canceled {
+        request_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u128>,
+    },
 }
 
-enum SocketEvent {
+pub(super) enum SocketEvent {
     Send(AiWsServerMessage),
     Finished(String),
 }
@@ -176,6 +221,8 @@ fn handle_client_text(
                     request_id: String::new(),
                     code: "invalid_message".to_string(),
                     error: sanitize_error(error.to_string()),
+                    thread_id: None,
+                    duration_ms: None,
                 },
             );
             return;
@@ -203,6 +250,26 @@ fn handle_client_text(
             active_tasks,
             connection_id,
         ),
+        AiWsClientMessage::MemoChatStart {
+            request_id,
+            thread_id,
+            client_thread_id,
+            locale,
+            message,
+            context_hints: _,
+        } => memo_chat::start(
+            MemoChatStartRequest {
+                request_id,
+                thread_id,
+                client_thread_id,
+                locale,
+                message,
+            },
+            state.clone(),
+            events_tx,
+            active_tasks,
+            connection_id,
+        ),
         AiWsClientMessage::Cancel { request_id } => {
             let canceled_running_task = if let Some(handle) = active_tasks.remove(&request_id) {
                 handle.abort();
@@ -217,7 +284,14 @@ fn handle_client_text(
                 active_tasks = active_tasks.len(),
                 "AI websocket task cancel requested"
             );
-            send_socket_event(events_tx, AiWsServerMessage::Canceled { request_id });
+            send_socket_event(
+                events_tx,
+                AiWsServerMessage::Canceled {
+                    request_id,
+                    thread_id: None,
+                    duration_ms: None,
+                },
+            );
         }
     }
 }
@@ -242,6 +316,8 @@ fn start_portfolio_image_import(
                 request_id,
                 code: "duplicate_request".to_string(),
                 error: "request_id is already active".to_string(),
+                thread_id: None,
+                duration_ms: None,
             },
         );
         return;
@@ -261,6 +337,8 @@ fn start_portfolio_image_import(
                 request_id,
                 code: "too_many_active_tasks".to_string(),
                 error: "too many active AI tasks on this connection".to_string(),
+                thread_id: None,
+                duration_ms: None,
             },
         );
         return;
@@ -279,6 +357,7 @@ fn start_portfolio_image_import(
         events_tx,
         AiWsServerMessage::Accepted {
             request_id: request_id.clone(),
+            thread_id: None,
         },
     );
 
@@ -358,6 +437,9 @@ async fn run_portfolio_image_import_task(
                     request_id: request_id.clone(),
                     artifact_type: PORTFOLIO_IMAGE_IMPORT_ARTIFACT.to_string(),
                     data,
+                    thread_id: None,
+                    message_id: None,
+                    duration_ms: None,
                 },
             );
         }
@@ -376,6 +458,8 @@ async fn run_portfolio_image_import_task(
                     request_id: request_id.clone(),
                     code: "portfolio_image_import_failed".to_string(),
                     error: sanitized_error,
+                    thread_id: None,
+                    duration_ms: None,
                 },
             );
         }
@@ -384,7 +468,10 @@ async fn run_portfolio_image_import_task(
     let _ = events_tx.send(SocketEvent::Finished(request_id));
 }
 
-fn send_socket_event(events_tx: &mpsc::UnboundedSender<SocketEvent>, message: AiWsServerMessage) {
+pub(super) fn send_socket_event(
+    events_tx: &mpsc::UnboundedSender<SocketEvent>,
+    message: AiWsServerMessage,
+) {
     let (request_id, message_type) = server_message_summary(&message);
     tracing::debug!(
         request_id = %request_id,
@@ -442,21 +529,24 @@ fn client_message_summary(message: &AiWsClientMessage) -> (&str, &'static str) {
         AiWsClientMessage::PortfolioImageImportStart { request_id, .. } => {
             (request_id, "portfolio_image_import.start")
         }
+        AiWsClientMessage::MemoChatStart { request_id, .. } => (request_id, "memo_chat.start"),
         AiWsClientMessage::Cancel { request_id } => (request_id, "cancel"),
     }
 }
 
 fn server_message_summary(message: &AiWsServerMessage) -> (&str, &'static str) {
     match message {
-        AiWsServerMessage::Accepted { request_id } => (request_id, "accepted"),
+        AiWsServerMessage::Accepted { request_id, .. } => (request_id, "accepted"),
         AiWsServerMessage::Progress { request_id, .. } => (request_id, "progress"),
+        AiWsServerMessage::Delta { request_id, .. } => (request_id, "delta"),
+        AiWsServerMessage::Artifact { request_id, .. } => (request_id, "artifact"),
         AiWsServerMessage::Completed { request_id, .. } => (request_id, "completed"),
         AiWsServerMessage::Failed { request_id, .. } => (request_id, "failed"),
-        AiWsServerMessage::Canceled { request_id } => (request_id, "canceled"),
+        AiWsServerMessage::Canceled { request_id, .. } => (request_id, "canceled"),
     }
 }
 
-fn sanitize_error(error: String) -> String {
+pub(super) fn sanitize_error(error: String) -> String {
     let mut lines = error.lines().take(4).collect::<Vec<_>>().join("\n");
     if lines.len() > 600 {
         lines.truncate(600);

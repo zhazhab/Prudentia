@@ -23,6 +23,9 @@ pub struct AppConfig {
     pub price_refresh_ttl_secs: Duration,
     pub symbol_directory_provider: String,
     pub symbol_directory_refresh_interval_secs: Duration,
+    pub web_research_provider: String,
+    pub tavily_api_key: Option<String>,
+    pub workspace_dir: PathBuf,
 }
 
 #[cfg(test)]
@@ -58,7 +61,7 @@ impl AppConfig {
         Self {
             bind_addr: env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string()),
             database_url: resolve_sqlite_url(env::var("DATABASE_URL").ok(), &paths.root_dir),
-            ai_provider: env::var("AI_PROVIDER").unwrap_or_else(|_| "mock".to_string()),
+            ai_provider: env::var("AI_PROVIDER").unwrap_or_else(|_| "cli".to_string()),
             openai_api_key: env::var("OPENAI_API_KEY").ok(),
             openai_base_url: env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
@@ -99,6 +102,10 @@ impl AppConfig {
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(24 * 60 * 60)),
+            web_research_provider: env::var("WEB_RESEARCH_PROVIDER")
+                .unwrap_or_else(|_| "disabled".to_string()),
+            tavily_api_key: env::var("TAVILY_API_KEY").ok(),
+            workspace_dir: paths.root_dir.join("data/workspace"),
         }
     }
 }

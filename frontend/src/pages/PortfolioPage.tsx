@@ -820,6 +820,7 @@ export function PortfolioPage() {
                 <span className={benchmark.available && !benchmark.stale ? "pill" : "pill warning"} key={benchmark.key}>
                   {benchmarkLabel(benchmark.key, benchmark.label, t)} · {benchmark.symbol} ·{" "}
                   {benchmarkStatusValue(benchmark, performance.data, benchmarkMetric, t)}
+                  {benchmark.source ? ` · ${benchmarkSourceLabel(benchmark.source)}` : ""}
                 </span>
               ))}
             </div>
@@ -1435,6 +1436,10 @@ function benchmarkStatusValue(
     return formatPercentPoints(portfolioReturn - benchmarkReturn);
   }
   return formatOptionalPercent(benchmark.return_pct);
+}
+
+function benchmarkSourceLabel(source: string) {
+  return source.replace(/_/g, " ");
 }
 
 function invalidatePortfolio(queryClient: ReturnType<typeof useQueryClient>) {
