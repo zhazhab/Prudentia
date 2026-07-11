@@ -5,6 +5,7 @@ import {
   constellationNodes,
   mergeConversationMessages,
   memoChatElapsedSeconds,
+  shouldSubmitComposerMessage,
   threadRailItems,
   usedContextDescriptor
 } from "../src/pages/homeRules.ts";
@@ -46,6 +47,45 @@ test("memo chat runtime reports non-negative elapsed seconds", () => {
   assert.equal(memoChatElapsedSeconds(1_000, 1_000), 0);
   assert.equal(memoChatElapsedSeconds(1_000, 47_499), 46);
   assert.equal(memoChatElapsedSeconds(2_000, 1_000), 0);
+});
+
+test("IME confirmation Enter does not submit the conversation composer", () => {
+  assert.equal(
+    shouldSubmitComposerMessage({
+      key: "Enter",
+      shiftKey: false,
+      isComposing: true,
+      keyCode: 13
+    }),
+    false
+  );
+  assert.equal(
+    shouldSubmitComposerMessage({
+      key: "Enter",
+      shiftKey: false,
+      isComposing: false,
+      keyCode: 229
+    }),
+    false
+  );
+  assert.equal(
+    shouldSubmitComposerMessage({
+      key: "Enter",
+      shiftKey: true,
+      isComposing: false,
+      keyCode: 13
+    }),
+    false
+  );
+  assert.equal(
+    shouldSubmitComposerMessage({
+      key: "Enter",
+      shiftKey: false,
+      isComposing: false,
+      keyCode: 13
+    }),
+    true
+  );
 });
 
 test("streamed assistant content never overwrites the user message with the same request id", () => {

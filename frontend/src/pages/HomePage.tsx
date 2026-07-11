@@ -42,6 +42,7 @@ import {
   type LiveConversationRun,
   mergeConversationMessages,
   memoChatElapsedSeconds,
+  shouldSubmitComposerMessage,
   shortThreadTitle,
   threadRailItems
 } from "./homeRules";
@@ -454,7 +455,12 @@ export function HomePage() {
           <label>
             <span>{t("home.inputLabel")}</span>
             <textarea value={input} rows={3} placeholder={t("home.placeholder")} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (shouldSubmitComposerMessage({
+                key: event.key,
+                shiftKey: event.shiftKey,
+                isComposing: event.nativeEvent.isComposing,
+                keyCode: event.keyCode
+              })) {
                 event.preventDefault();
                 event.currentTarget.form?.requestSubmit();
               }

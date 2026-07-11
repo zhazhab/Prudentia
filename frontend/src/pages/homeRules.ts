@@ -56,6 +56,20 @@ export function memoChatElapsedSeconds(startedAtMs: number, nowMs: number) {
   return Math.max(0, Math.floor((nowMs - startedAtMs) / 1_000));
 }
 
+export function shouldSubmitComposerMessage(event: {
+  key: string;
+  shiftKey: boolean;
+  isComposing: boolean;
+  keyCode: number;
+}) {
+  return (
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !event.isComposing &&
+    event.keyCode !== 229
+  );
+}
+
 export function usedContextDescriptor(item: unknown): UsedContextDescriptor {
   if (!item || typeof item !== "object") {
     return {
