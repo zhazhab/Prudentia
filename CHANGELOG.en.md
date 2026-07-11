@@ -6,6 +6,7 @@ All notable changes to Prudentia should be recorded here. Add the newest entry a
 
 ## Unreleased
 
+- Improved conversation completion timing and context display: pure greetings/capability questions without attachments or research still use the real AI provider for the visible reply but skip the redundant structured-action projection; the frontend now renders thread summaries, prior turns, holdings, rule graphs, and other internal context labels as readable localized text.
 - Rebuilt the temporary home memo chat as a complete `ConversationEngine` workspace: real CLI/OpenAI SSE providers, ordered non-mock fallback, persisted run events with reconnect replay, truthful phases/cancel/retry, thread subjects and mobile drawers, Markdown/sources/attachments/research degradation, plus independently confirmed company-view versions, historical-FX trade ledger, and executable rule DAGs; shared attachments and company Markdown use relative paths under the original repository's local root.
 - Replaced the ellipsis-only chat wait state with explicit frontend phases for connecting, backend execution, and response streaming, including continuously updated elapsed time.
 - Fixed holdings market-value sorting semantics: `GET /api/portfolio/positions` now returns per-holding CNY value as `market_value_base`, and both backend default ordering and frontend market-value sorting use unified CNY value instead of comparing native-currency display numbers.

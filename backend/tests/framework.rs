@@ -241,6 +241,21 @@ async fn conversation_run_persists_events_and_natural_assistant_message() {
     assert!(event_types.contains(&"run.accepted".to_string()));
     assert!(event_types.contains(&"message.delta".to_string()));
     assert!(event_types.contains(&"run.completed".to_string()));
+
+    let phases = sqlx::query_scalar::<_, String>(
+        r#"SELECT json_extract(payload_json, '$.phase')
+        FROM conversation_run_events
+        WHERE run_id = ? AND event_type = 'run.phase'
+        ORDER BY event_id"#,
+    )
+    .bind(&accepted.run.id)
+    .fetch_all(&pool)
+    .await
+    .expect("run phases");
+    assert!(
+        !phases.contains(&"extracting_actions".to_string()),
+        "casual greetings must not start a second action-projection model call"
+    );
 }
 
 #[tokio::test]

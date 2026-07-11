@@ -61,7 +61,7 @@ Base URL：`http://127.0.0.1:8080`
 }
 ```
 
-同一个线程最多有一个 `queued`/`running` 任务，不同线程可以并行。阶段依次为 `queued`、`resolving_subject`、`loading_context`、`researching`、`generating`、`extracting_actions`、`persisting`，终态为 `completed`、`failed`、`canceled` 或 `interrupted`。取消会终止真实 provider 进程；重试从原用户消息创建新运行。后端启动时会把遗留活动运行标记为 `interrupted`。
+同一个线程最多有一个 `queued`/`running` 任务，不同线程可以并行。阶段为 `queued`、`resolving_subject`、`loading_context`、`researching`、`generating`、`extracting_actions`、`persisting`，终态为 `completed`、`failed`、`canceled` 或 `interrupted`；其中 `researching` 只在需要外部检索时出现，`extracting_actions` 会对无附件、无检索结果的纯寒暄或能力询问省略。取消会终止真实 provider 进程；重试从原用户消息创建新运行。后端启动时会把遗留活动运行标记为 `interrupted`。
 
 事件 WebSocket 只订阅持久化事件，不拥有任务生命周期。每个事件包含单调递增的 `event_id`、`run_id`、`thread_id`、`event_type`、`payload` 和 `created_at`。客户端把最后处理的序号传给 `after_event_id`，服务端先重放再持续推送；常见事件为 `run.accepted`、`run.phase`、`message.delta`、`message.completed`、`source.added`、`action.proposed`、`action.updated`、`run.warning` 和各类运行终态。OpenAI-compatible provider 发送真实 SSE token delta；CLI provider 没有 token delta 时只发送阶段，完成后一次持久化正文，不做伪流式分段。
 

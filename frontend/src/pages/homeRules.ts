@@ -4,6 +4,7 @@ import type {
   MemoThreadSummary,
   PortfolioPosition
 } from "../types/domain";
+import type { TranslationKey } from "../i18n";
 
 export interface LiveConversationRun extends ConversationRun {
   streamContent: string;
@@ -22,6 +23,11 @@ export interface ConstellationNode {
   tone: string;
   color: string;
   weight: number;
+}
+
+export interface UsedContextDescriptor {
+  key: TranslationKey;
+  params: Record<string, string | number>;
 }
 
 const constellationColors = ["#2f6f73", "#8b5d33", "#7a4a63", "#4f6f37", "#53617a", "#94624f"];
@@ -48,6 +54,44 @@ export function threadRailItems<T extends MemoThreadSummary>(threads: T[], limit
 
 export function memoChatElapsedSeconds(startedAtMs: number, nowMs: number) {
   return Math.max(0, Math.floor((nowMs - startedAtMs) / 1_000));
+}
+
+export function usedContextDescriptor(item: unknown): UsedContextDescriptor {
+  if (!item || typeof item !== "object") {
+    return {
+      key: "home.contextRaw",
+      params: { value: String(item ?? "") }
+    };
+  }
+
+  const value = item as Record<string, unknown>;
+  const kind = typeof value.kind === "string" ? value.kind : "";
+  const label = String(value.label ?? kind);
+  const count = firstInteger(label);
+
+  switch (kind) {
+    case "thread_summary":
+      return { key: "home.contextThreadSummary", params: { value: label } };
+    case "turn_summaries":
+      return { key: "home.contextPriorTurns", params: { count } };
+    case "portfolio":
+      return { key: "home.contextPositions", params: { count } };
+    case "investment_system":
+      return { key: "home.contextRuleGraph", params: { version: count } };
+    case "company":
+      return { key: "home.contextCompanyView", params: { value: label } };
+    case "attachment":
+      return { key: "home.contextAttachment", params: { value: label } };
+    case "source":
+      return { key: "home.contextResearchSource", params: { value: label } };
+    default:
+      return { key: "home.contextRaw", params: { value: label } };
+  }
+}
+
+function firstInteger(value: string) {
+  const match = value.match(/\d+/);
+  return match ? Number(match[0]) : 0;
 }
 
 export function mergeConversationMessages(

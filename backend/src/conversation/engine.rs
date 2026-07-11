@@ -13,7 +13,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ai::{runtime::AiRuntime, AiProviderEvent, ConversationActionDraft},
+    ai::{runtime::AiRuntime, AiProviderEvent, ConversationActionDraft, ConversationProjection},
     error::{AppError, AppResult},
     locale::Locale,
     market_data::MarketDataProvider,
@@ -399,24 +399,35 @@ impl ConversationEngine {
             .await?;
         }
 
-        self.phase(&run, "extracting_actions", None, None).await?;
-        let projection = match self
-            .ai
-            .project_conversation(&context, &assistant_response, locale)
-            .await
-        {
-            Ok(projection) => projection,
-            Err(error) => {
-                self.emit(
-                    run_id,
-                    &run.thread_id,
-                    "run.warning",
-                    json!({ "code": "action_projection_failed", "message": error.to_string() }),
-                )
-                .await?;
-                crate::ai::ConversationProjection {
-                    summary: fallback_summary(&user_message),
-                    actions: Vec::new(),
+        let projection = if should_skip_action_projection(
+            &user_message,
+            !context.attachments.is_empty(),
+            !context.research_sources.is_empty(),
+        ) {
+            ConversationProjection {
+                summary: casual_turn_summary(locale).to_string(),
+                actions: Vec::new(),
+            }
+        } else {
+            self.phase(&run, "extracting_actions", None, None).await?;
+            match self
+                .ai
+                .project_conversation(&context, &assistant_response, locale)
+                .await
+            {
+                Ok(projection) => projection,
+                Err(error) => {
+                    self.emit(
+                        run_id,
+                        &run.thread_id,
+                        "run.warning",
+                        json!({ "code": "action_projection_failed", "message": error.to_string() }),
+                    )
+                    .await?;
+                    ConversationProjection {
+                        summary: fallback_summary(&user_message),
+                        actions: Vec::new(),
+                    }
                 }
             }
         };
@@ -579,4 +590,94 @@ fn fallback_summary(message: &str) -> String {
         summary.push_str("...");
     }
     summary
+}
+
+fn should_skip_action_projection(
+    message: &str,
+    has_attachments: bool,
+    has_research_sources: bool,
+) -> bool {
+    if has_attachments || has_research_sources {
+        return false;
+    }
+
+    let normalized = message
+        .trim()
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '!' | '！'
+                        | '?'
+                        | '？'
+                        | '.'
+                        | '。'
+                        | ','
+                        | '，'
+                        | ':'
+                        | '：'
+                        | ';'
+                        | '；'
+                        | '~'
+                        | '～'
+                )
+        })
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "你好"
+            | "您好"
+            | "你好啊"
+            | "嗨"
+            | "在吗"
+            | "早上好"
+            | "下午好"
+            | "晚上好"
+            | "晚安"
+            | "你是谁"
+            | "你能做什么"
+            | "你可以做什么"
+            | "你能干什么"
+            | "能干什么"
+            | "hello"
+            | "hi"
+            | "hey"
+            | "who are you"
+            | "what can you do"
+    )
+}
+
+fn casual_turn_summary(locale: Locale) -> &'static str {
+    if locale.is_zh() {
+        "用户进行了寒暄或能力询问，未产生可确认变更。"
+    } else {
+        "The user greeted the assistant or asked about its capabilities; no confirmable changes were proposed."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_action_projection;
+
+    #[test]
+    fn casual_turns_skip_action_projection() {
+        assert!(should_skip_action_projection("你好！", false, false));
+        assert!(should_skip_action_projection(
+            "What can you do?",
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn material_or_evidence_backed_turns_keep_action_projection() {
+        assert!(!should_skip_action_projection(
+            "你好，帮我记录买入 100 股。",
+            false,
+            false
+        ));
+        assert!(!should_skip_action_projection("你好", true, false));
+        assert!(!should_skip_action_projection("你好", false, true));
+    }
 }

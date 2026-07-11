@@ -3,6 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { MemoThreadMessage } from "../types/domain";
 import { useI18n } from "../i18n";
+import { usedContextDescriptor } from "../pages/homeRules";
 
 export function ConversationMessage({
   message,
@@ -74,9 +75,14 @@ export function ConversationMessage({
           <details className="message-disclosure">
             <summary>{t("home.usedContext")}</summary>
             <ul>
-              {message.used_context.map((item, index) => (
-                <li key={`${message.id}:context:${index}`}>{contextLabel(item)}</li>
-              ))}
+              {message.used_context.map((item, index) => {
+                const descriptor = usedContextDescriptor(item);
+                return (
+                  <li key={`${message.id}:context:${index}`}>
+                    {t(descriptor.key, descriptor.params)}
+                  </li>
+                );
+              })}
             </ul>
           </details>
         ) : null}
@@ -99,12 +105,4 @@ function sourceLink(source: unknown) {
   ) : (
     title
   );
-}
-
-function contextLabel(item: unknown) {
-  if (!item || typeof item !== "object") {
-    return String(item);
-  }
-  const value = item as Record<string, unknown>;
-  return String(value.label ?? value.kind ?? "Context");
 }

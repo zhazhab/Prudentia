@@ -7,7 +7,7 @@ import type {
   PortfolioPosition,
   PortfolioSummary
 } from "../types/domain";
-import { constellationNodes } from "../pages/homeRules";
+import { constellationNodes, usedContextDescriptor } from "../pages/homeRules";
 import { formatBaseMoney, formatMoney, percent } from "../pages/portfolioRules";
 import { EmptyState } from "./EmptyState";
 
@@ -130,7 +130,10 @@ export function ConversationContextPanel({
       {tab === "used" ? (
         <div className="context-tab-panel used-context-panel">
           {latestContext?.length ? (
-            latestContext.map((item, index) => <div key={index}>{contextLabel(item)}</div>)
+            latestContext.map((item, index) => {
+              const descriptor = usedContextDescriptor(item);
+              return <div key={index}>{t(descriptor.key, descriptor.params)}</div>;
+            })
           ) : (
             <p className="context-empty-copy">{t("home.noUsedContext")}</p>
           )}
@@ -152,10 +155,4 @@ function companySections(view: CompanyView): Array<[string, string]> {
     ["Disconfirming evidence", view.content.disconfirming_evidence],
     ["Open questions", view.content.open_questions.join("\n")]
   ];
-}
-
-function contextLabel(item: unknown) {
-  if (!item || typeof item !== "object") return String(item);
-  const value = item as Record<string, unknown>;
-  return String(value.label ?? value.kind ?? "Context");
 }

@@ -5,7 +5,8 @@ import {
   constellationNodes,
   mergeConversationMessages,
   memoChatElapsedSeconds,
-  threadRailItems
+  threadRailItems,
+  usedContextDescriptor
 } from "../src/pages/homeRules.ts";
 import type {
   ConversationRun,
@@ -69,6 +70,21 @@ test("streamed assistant content never overwrites the user message with the same
 
   assert.equal(merged[0].content, "你好");
   assert.equal(merged[1].content, "自然回复");
+});
+
+test("used context metadata maps internal labels to localized descriptors", () => {
+  assert.deepEqual(
+    usedContextDescriptor({ kind: "turn_summaries", label: "1 prior turns" }),
+    { key: "home.contextPriorTurns", params: { count: 1 } }
+  );
+  assert.deepEqual(
+    usedContextDescriptor({ kind: "portfolio", label: "6 positions" }),
+    { key: "home.contextPositions", params: { count: 6 } }
+  );
+  assert.deepEqual(
+    usedContextDescriptor({ kind: "investment_system", label: "rule graph v1" }),
+    { key: "home.contextRuleGraph", params: { version: 1 } }
+  );
 });
 
 test("portfolio constellation layout is deterministic and groups by market currency", () => {
