@@ -176,14 +176,22 @@ AI_CLI_PROFILE=
 
 `AI_PROVIDER` 可以配置为有序 fallback 链，例如 `cli,openai`。只有前一个 provider 尚未输出可见正文时才允许切换；不会自动回退到 mock。首页寒暄和普通问题同样由真实 provider 生成，不使用硬编码回复。
 
-可选启用 Tavily 外部研究：
+默认使用稳定的公共数据源，不需要搜索 API key，也不依赖 AI CLI 的搜索能力：
+
+```env
+WEB_RESEARCH_PROVIDER=public_sources
+```
+
+“最新财报”、“分析一下 PDD”、“PDD 的护城河是什么”等实质性公司讨论会自动执行三路确定性检索：SEC 最新申报及其主文/财报附件、Yahoo Finance 关联新闻/分析，以及 TradingView 带平台 hot 标记和点赞/评论数据的公司观点。搜索服务只接收公司名、证券代码和结构化研究意图，不接收原始对话或仓位数量；所有来源 URL 都经过公网地址和真实页面校验，社区观点还必须同时具备平台 hot 标记和互动数据。一手事实、二手分析和社区观点会分开使用，社区内容只作为未核验的观点/情绪信号，不作为公司事实。完整和部分结果都缓存 24 小时；任一来源失败时会标记未完成的证据类别。当前无 key 默认源对美股公司的官方申报覆盖最好；Tavily 可用于扩展其他市场和雪球、Reddit、StockTwits、Moomoo、东方财富等更多社区。
+
+也可以改用 Tavily：
 
 ```env
 WEB_RESEARCH_PROVIDER=tavily
 TAVILY_API_KEY=your_key
 ```
 
-不配置时使用 `WEB_RESEARCH_PROVIDER=disabled`。外部检索不可用不会阻断本地对话，但回复会标记未完成外部核验。对话附件、公司 Markdown 投影与 SQLite 一样保存在原仓库共享本地根目录下；数据库只记录相对路径，因此不同 worktree 会读写同一份本地资料。
+只有显式配置 `WEB_RESEARCH_PROVIDER=disabled` 才会关闭自动检索。外部检索不可用不会阻断本地对话，但回复会标记未完成外部核验。对话附件、公司 Markdown 投影与 SQLite 一样保存在原仓库共享本地根目录下；数据库只记录相对路径，因此不同 worktree 会读写同一份本地资料。
 
 也可以在应用的 Settings 页面编辑 AI 配置。保存后配置会立即生效，并写入原仓库工作目录的共享 `.env`，后端重启或切换 worktree 后继续保留。
 

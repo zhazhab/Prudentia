@@ -42,7 +42,9 @@ Conversation home 以 thread 为默认交互对象。前端桌面使用线程、
 
 原始消息与 `conversation_runs` / `conversation_run_events` 是事实来源。`ConversationEngine` 在一个事务中先保存用户输入和运行，再按主题识别、上下文装配、按需研究、自然回复、结构化动作提取和持久化执行。无附件、无检索结果的纯寒暄或能力询问在真实 provider 回复后会跳过无意义的结构化动作提取；投资内容仍执行完整流程。WebSocket 只是带 `event_id` 游标的重放/订阅通道，断开不会取消任务；每线程只允许一个活动运行，不同线程可并行，启动恢复会把遗留任务标为 `interrupted`。不可变轮次摘要、滚动线程摘要、公司看法、持仓和规则图是可从事实记录重建的投影。
 
-所有可见回复都来自配置的真实 provider，包括寒暄和能力介绍。OpenAI-compatible provider 解析真实 SSE token；Codex CLI 持续读取 JSONL 运行事件，没有 token delta 时只更新阶段并在完成后一次展示正文。`AI_PROVIDER` 支持有序 fallback，但只有前一个 provider 尚未输出正文时才能切换，mock 不会被自动选中。外部研究通过 `WebResearchProvider` 接口接入 Tavily 或 disabled adapter；不可用时继续使用本地上下文并显式标记未完成外部核验。
+所有可见回复都来自配置的真实 provider，包括寒暄和能力介绍。OpenAI-compatible provider 解析真实 SSE token；Codex CLI 持续读取 JSONL 运行事件，没有 token delta 时只更新阶段并在完成后一次展示正文。`AI_PROVIDER` 支持有序 fallback，但只有前一个 provider 尚未输出正文时才能切换，mock 不会被自动选中。外部研究通过 `WebResearchProvider` 接口接入默认的无 key public-sources adapter、可选 Tavily 或 disabled adapter；默认 adapter 并行读取 SEC 最新申报及主文/财报附件、Yahoo Finance 关联新闻/分析和带 hot/互动数据的 TradingView 公司观点。完整与部分结果都按 provider 分区缓存 24 小时，部分失败结果携带证据类别警告。社区来源标记为 `community`，只作为观点与情绪信号。检索不可用时继续使用本地上下文并显式标记未完成外部核验。
+
+研究规划只对已解析为 `company` 的主题生效，provider 边界保留公司名/代码和结构化研究意图，不接收原始对话、仓位或其他私有上下文。public-sources adapter 固定三次检索，Tavily 固定三类查询，因此预算不依赖模型自律。SEC/TradingView 来源只接受各自平台返回的同域 HTTPS URL，TradingView 观点还必须具备 `is_hot` 和非零互动数据；Yahoo/Tavily 返回的 URL 会按解析后的 host 分类，在禁止重定向且锁定公网 DNS 结果的请求中核验。直连被公开站点反爬拒绝时，可通过只读公开网页转换服务复核原 URL 对应的正文。重定向、非成功状态、软 404、私网地址和无页面互动依据的社区来源都不会进入模型上下文；模型同时被要求将网页与附件内容视为不可信证据数据，而不是指令。
 
 模型只生成提议，不直接更新投资数据。公司章节补丁、交易记录和规则图补丁分别生成独立确认卡；用户编辑/确认后，由确定性业务代码执行并通过目标版本和幂等状态防止重复写入。公司确认创建不可变版本与 Markdown 投影；交易确认使用历史汇率和导入基线更新数量、平均成本和 TWR 资金流，修正通过冲正/替代事件完成；规则确认创建并激活通过端口类型、无环性、schema 和 adapter 校验的新 DAG 版本。
 

@@ -23,14 +23,33 @@ pub struct AppConfig {
     pub price_refresh_ttl_secs: Duration,
     pub symbol_directory_provider: String,
     pub symbol_directory_refresh_interval_secs: Duration,
-    pub web_research_provider: String,
+    pub web_research_provider: WebResearchProviderKind,
     pub tavily_api_key: Option<String>,
     pub workspace_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebResearchProviderKind {
+    PublicSources,
+    Tavily,
+    Disabled,
+    Invalid(String),
+}
+
+impl WebResearchProviderKind {
+    fn parse(value: String) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "public" | "public_sources" => Self::PublicSources,
+            "tavily" => Self::Tavily,
+            "disabled" => Self::Disabled,
+            _ => Self::Invalid(value),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{local_state_dir_from_git_common_dir, resolve_sqlite_url};
+    use super::{local_state_dir_from_git_common_dir, resolve_sqlite_url, WebResearchProviderKind};
     use std::path::Path;
 
     #[test]
@@ -48,6 +67,22 @@ mod tests {
         assert_eq!(
             local_state_dir_from_git_common_dir(Path::new("/repo/.git")),
             Some(Path::new("/repo").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn research_provider_configuration_is_typed_at_the_environment_edge() {
+        assert_eq!(
+            WebResearchProviderKind::parse("public_sources".to_string()),
+            WebResearchProviderKind::PublicSources
+        );
+        assert_eq!(
+            WebResearchProviderKind::parse("disabled".to_string()),
+            WebResearchProviderKind::Disabled
+        );
+        assert_eq!(
+            WebResearchProviderKind::parse("typo".to_string()),
+            WebResearchProviderKind::Invalid("typo".to_string())
         );
     }
 }
@@ -102,8 +137,9 @@ impl AppConfig {
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(24 * 60 * 60)),
-            web_research_provider: env::var("WEB_RESEARCH_PROVIDER")
-                .unwrap_or_else(|_| "disabled".to_string()),
+            web_research_provider: WebResearchProviderKind::parse(
+                env::var("WEB_RESEARCH_PROVIDER").unwrap_or_else(|_| "public_sources".to_string()),
+            ),
             tavily_api_key: env::var("TAVILY_API_KEY").ok(),
             workspace_dir: paths.root_dir.join("data/workspace"),
         }

@@ -22,7 +22,7 @@ use crate::{
 use super::{
     actions,
     context::{assemble_context, resolve_subject, ConversationResearchContext},
-    research::{search_with_cache, should_research, WebResearchProvider},
+    research::{plan_research, search_with_cache, WebResearchProvider},
     storage,
     types::{
         ConfirmActionRequest, ConversationAction, ConversationRun, ConversationThreadDetail,
@@ -314,11 +314,12 @@ impl ConversationEngine {
         let mut sources = Vec::new();
         let mut source_values = Vec::new();
         let mut research_warning = None;
-        if should_research(&user_message) {
+        if let Some(research_request) = plan_research(&user_message, &subject) {
             self.phase(&run, "researching", None, None).await?;
-            match search_with_cache(&self.pool, self.research.clone(), &user_message).await {
-                Ok(results) => {
-                    for source in results {
+            match search_with_cache(&self.pool, self.research.clone(), &research_request).await {
+                Ok(outcome) => {
+                    research_warning = outcome.warning;
+                    for source in outcome.sources {
                         let value = storage::insert_source(&self.pool, run_id, &source).await?;
                         self.emit(run_id, &run.thread_id, "source.added", value.clone())
                             .await?;
@@ -601,51 +602,7 @@ fn should_skip_action_projection(
         return false;
     }
 
-    let normalized = message
-        .trim()
-        .trim_matches(|character: char| {
-            character.is_whitespace()
-                || matches!(
-                    character,
-                    '!' | '！'
-                        | '?'
-                        | '？'
-                        | '.'
-                        | '。'
-                        | ','
-                        | '，'
-                        | ':'
-                        | '：'
-                        | ';'
-                        | '；'
-                        | '~'
-                        | '～'
-                )
-        })
-        .to_ascii_lowercase();
-
-    matches!(
-        normalized.as_str(),
-        "你好"
-            | "您好"
-            | "你好啊"
-            | "嗨"
-            | "在吗"
-            | "早上好"
-            | "下午好"
-            | "晚上好"
-            | "晚安"
-            | "你是谁"
-            | "你能做什么"
-            | "你可以做什么"
-            | "你能干什么"
-            | "能干什么"
-            | "hello"
-            | "hi"
-            | "hey"
-            | "who are you"
-            | "what can you do"
-    )
+    super::is_simple_social_turn(message)
 }
 
 fn casual_turn_summary(locale: Locale) -> &'static str {

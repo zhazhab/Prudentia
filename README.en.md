@@ -176,14 +176,22 @@ AI_CLI_PROFILE=
 
 `AI_PROVIDER` may be an ordered fallback chain such as `cli,openai`. A provider can only fall back before it emits visible response text, and the runtime never falls back to mock automatically. Greetings and ordinary questions also go through the configured real provider instead of hardcoded replies.
 
-Optionally enable Tavily research:
+By default, research uses stable public data sources. It requires no search API key and does not depend on the AI CLI's search capabilities:
+
+```env
+WEB_RESEARCH_PROVIDER=public_sources
+```
+
+Substantive company discussion such as "latest earnings," "analyze PDD," or "what is PDD's moat?" automatically runs three deterministic retrievals: recent SEC filings plus their primary filing/earnings attachment, ticker-linked Yahoo Finance news/analysis, and TradingView company ideas with both the platform's hot flag and visible like/comment counts. The provider receives only the company name, symbol, and structured research intent, never raw conversation text or position sizes. Every source URL must pass public-address and real-page checks, while community ideas additionally require both platform ranking and engagement evidence. Primary facts, secondary analysis, and community viewpoints stay separate; community content is unverified opinion/sentiment rather than company fact. Complete and partial results are cached for 24 hours; a failed source is named as an incomplete evidence class. The default keyless provider has the strongest official-filing coverage for US-listed companies; Tavily can broaden other markets and communities such as Xueqiu, Reddit, StockTwits, Moomoo, and Eastmoney Guba.
+
+Tavily remains available as an alternative:
 
 ```env
 WEB_RESEARCH_PROVIDER=tavily
 TAVILY_API_KEY=your_key
 ```
 
-Use `WEB_RESEARCH_PROVIDER=disabled` when it is not configured. Unavailable external search does not block local-context conversation, but the response is marked as not externally verified. Conversation attachments, company Markdown projections, and SQLite use the original repository's shared local root; the database stores relative paths so all worktrees read and write the same local material.
+Set `WEB_RESEARCH_PROVIDER=disabled` explicitly to turn automatic research off. Unavailable external search does not block local-context conversation, but the response is marked as not externally verified. Conversation attachments, company Markdown projections, and SQLite use the original repository's shared local root; the database stores relative paths so all worktrees read and write the same local material.
 
 You can also edit AI settings from the app Settings page. Saving applies changes immediately and writes them to the shared `.env` in the original repository working tree, so the settings persist across backend restarts and new worktrees.
 

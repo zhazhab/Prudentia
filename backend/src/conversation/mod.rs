@@ -28,6 +28,54 @@ pub use engine::ConversationEngine;
 pub use research::provider_from_config as research_provider_from_config;
 pub use types::*;
 
+fn is_simple_social_turn(message: &str) -> bool {
+    let normalized = message
+        .trim()
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '!' | '！'
+                        | '?'
+                        | '？'
+                        | '.'
+                        | '。'
+                        | ','
+                        | '，'
+                        | ':'
+                        | '：'
+                        | ';'
+                        | '；'
+                        | '~'
+                        | '～'
+                )
+        })
+        .to_ascii_lowercase();
+
+    matches!(
+        normalized.as_str(),
+        "你好"
+            | "您好"
+            | "你好啊"
+            | "嗨"
+            | "在吗"
+            | "早上好"
+            | "下午好"
+            | "晚上好"
+            | "晚安"
+            | "你是谁"
+            | "你能做什么"
+            | "你可以做什么"
+            | "你能干什么"
+            | "能干什么"
+            | "hello"
+            | "hi"
+            | "hey"
+            | "who are you"
+            | "what can you do"
+    )
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/runs", post(start_run))
