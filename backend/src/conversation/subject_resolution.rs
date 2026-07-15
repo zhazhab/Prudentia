@@ -259,7 +259,7 @@ fn select_pending_candidate<'a>(
             (score > 0).then_some((score, candidate))
         })
         .collect::<Vec<_>>();
-    scored.sort_by(|left, right| right.0.cmp(&left.0));
+    scored.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
     if scored.is_empty() || scored.get(1).is_some_and(|next| next.0 == scored[0].0) {
         None
     } else {
@@ -504,13 +504,10 @@ fn company_name_aliases(name: &str) -> Vec<String> {
     if valid_company_alias(&candidate) {
         aliases.push(candidate.clone());
     }
-    loop {
-        let Some(stripped) = SUFFIXES
-            .iter()
-            .find_map(|suffix| candidate.strip_suffix(suffix))
-        else {
-            break;
-        };
+    while let Some(stripped) = SUFFIXES
+        .iter()
+        .find_map(|suffix| candidate.strip_suffix(suffix))
+    {
         candidate = trim_company_name(stripped).to_string();
         if valid_company_alias(&candidate) {
             aliases.push(candidate.clone());
