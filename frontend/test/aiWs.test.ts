@@ -19,6 +19,25 @@ test("parses ai websocket messages by request id", () => {
   );
 });
 
+test("parses memo chat websocket delta messages", () => {
+  assert.deepEqual(
+    parseAiWsMessage(
+      JSON.stringify({
+        type: "delta",
+        request_id: "req-1",
+        thread_id: "thread-1",
+        content: "第一段"
+      })
+    ),
+    {
+      type: "delta",
+      request_id: "req-1",
+      thread_id: "thread-1",
+      content: "第一段"
+    }
+  );
+});
+
 test("rejects websocket messages without a request id", () => {
   assert.throws(
     () => parseAiWsMessage(JSON.stringify({ type: "completed" })),

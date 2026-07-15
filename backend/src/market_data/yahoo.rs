@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -42,6 +43,22 @@ impl MarketDataProvider for YahooMarketDataProvider {
     ) -> Result<ExchangeRate, MarketDataError> {
         yahoo_exchange_rate(&self.client, from_currency, to_currency, "yahoo").await
     }
+
+    async fn exchange_rate_at(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+        rate_date: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        yahoo_exchange_rate_at(
+            &self.client,
+            from_currency,
+            to_currency,
+            rate_date,
+            "yahoo:historical",
+        )
+        .await
+    }
 }
 
 pub async fn yahoo_exchange_rate(
@@ -72,6 +89,54 @@ pub async fn yahoo_exchange_rate(
         rate: quote.price,
         source: source.to_string(),
         updated_at: quote.updated_at,
+    })
+}
+
+pub async fn yahoo_exchange_rate_at(
+    client: &Client,
+    from_currency: &str,
+    to_currency: &str,
+    rate_date: &str,
+    source: &str,
+) -> Result<ExchangeRate, MarketDataError> {
+    let from = normalize_currency(from_currency);
+    let to = normalize_currency(to_currency);
+    if from == to {
+        return Ok(ExchangeRate {
+            from_currency: from,
+            to_currency: to,
+            rate: 1.0,
+            source: "identity".to_string(),
+            updated_at: rate_date.to_string(),
+        });
+    }
+
+    let date = NaiveDate::parse_from_str(rate_date, "%Y-%m-%d").map_err(|_| {
+        MarketDataError::Provider("historical FX date must be YYYY-MM-DD".to_string())
+    })?;
+    let period1 = Utc
+        .from_utc_datetime(
+            &(date - Duration::days(4))
+                .and_hms_opt(0, 0, 0)
+                .expect("valid midnight"),
+        )
+        .timestamp();
+    let period2 = Utc
+        .from_utc_datetime(
+            &(date + Duration::days(2))
+                .and_hms_opt(0, 0, 0)
+                .expect("valid midnight"),
+        )
+        .timestamp();
+    let symbol = format!("{from}{to}=X");
+    let body = yahoo_chart_body_for_period(client, &symbol, period1, period2).await?;
+    let (rate, updated_at) = parse_yahoo_historical_close(&body, rate_date)?;
+    Ok(ExchangeRate {
+        from_currency: from,
+        to_currency: to,
+        rate,
+        source: source.to_string(),
+        updated_at,
     })
 }
 
@@ -137,6 +202,62 @@ async fn yahoo_chart_body(client: &Client, symbol: &str) -> Result<String, Marke
         .map_err(|err| MarketDataError::Provider(err.to_string()))
 }
 
+async fn yahoo_chart_body_for_period(
+    client: &Client,
+    symbol: &str,
+    period1: i64,
+    period2: i64,
+) -> Result<String, MarketDataError> {
+    client
+        .get(format!("{YAHOO_CHART_URL}/{symbol}"))
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .query(&[
+            ("period1", period1.to_string()),
+            ("period2", period2.to_string()),
+            ("interval", "1d".to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|err| MarketDataError::Provider(err.to_string()))?
+        .error_for_status()
+        .map_err(|err| MarketDataError::Provider(err.to_string()))?
+        .text()
+        .await
+        .map_err(|err| MarketDataError::Provider(err.to_string()))
+}
+
+pub fn parse_yahoo_historical_close(
+    body: &str,
+    rate_date: &str,
+) -> Result<(f64, String), MarketDataError> {
+    let response: YahooChartResponse =
+        serde_json::from_str(body).map_err(|err| MarketDataError::Provider(err.to_string()))?;
+    let result = response
+        .chart
+        .result
+        .and_then(|mut results| results.drain(..).next())
+        .ok_or_else(|| MarketDataError::Provider("missing Yahoo historical result".to_string()))?;
+    let closes = result
+        .indicators
+        .and_then(|indicators| indicators.quote.into_iter().next())
+        .map(|quote| quote.close)
+        .unwrap_or_default();
+    let target = NaiveDate::parse_from_str(rate_date, "%Y-%m-%d").map_err(|_| {
+        MarketDataError::Provider("historical FX date must be YYYY-MM-DD".to_string())
+    })?;
+    result
+        .timestamp
+        .into_iter()
+        .zip(closes)
+        .filter_map(|(timestamp, close)| {
+            let date = chrono::DateTime::from_timestamp(timestamp, 0)?.date_naive();
+            (date <= target).then_some((date, timestamp, close?))
+        })
+        .max_by_key(|(date, _, _)| *date)
+        .map(|(_, timestamp, rate)| (rate, unix_timestamp_to_iso(timestamp)))
+        .ok_or_else(|| MarketDataError::Provider(format!("no Yahoo FX close near {rate_date}")))
+}
+
 fn normalize_currency(currency: impl AsRef<str>) -> String {
     currency.as_ref().trim().to_ascii_uppercase()
 }
@@ -166,6 +287,8 @@ struct YahooChartError {
 #[derive(Deserialize)]
 struct YahooChartResult {
     meta: YahooChartMeta,
+    #[serde(default)]
+    timestamp: Vec<i64>,
     indicators: Option<YahooIndicators>,
 }
 
@@ -188,4 +311,6 @@ struct YahooIndicators {
 struct YahooQuoteSeries {
     #[serde(default)]
     volume: Vec<Option<i64>>,
+    #[serde(default)]
+    close: Vec<Option<f64>>,
 }

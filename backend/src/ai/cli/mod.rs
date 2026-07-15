@@ -7,17 +7,31 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
+    process::Command,
+    sync::mpsc,
+};
 use uuid::Uuid;
+
+pub mod codex;
+mod projection;
+mod usage;
+use codex::codex_provider_stage;
+use projection::CliConversationProjection;
+use usage::log_cli_token_usage;
 
 use crate::{
     ai::{
         prompt::{
-            extract_json_object, investment_system_refinement_prompt, memo_extraction_prompt,
-            portfolio_image_recognition_prompt, portfolio_image_recognition_schema,
-            portfolio_review_prompt, research_distillation_prompt, stock_snapshot_prompt,
+            conversation_projection_cli_prompt, conversation_projection_schema,
+            conversation_response_prompt, investment_system_refinement_prompt, memo_chat_prompt,
+            memo_extraction_prompt, parse_json_object, portfolio_image_recognition_prompt,
+            portfolio_image_recognition_schema, portfolio_review_prompt,
+            research_distillation_prompt, stock_snapshot_prompt,
         },
-        AiError, AiProvider, InvestmentSystemRefinement, MemoExtraction, PortfolioImageRecognition,
+        AiError, AiProvider, AiProviderEvent, ConversationContext, ConversationProjection,
+        InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioImageRecognition,
         PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
@@ -76,6 +90,12 @@ impl Default for CliSettings {
 pub trait CliBackend: Clone + Send + Sync + 'static {
     fn kind(&self) -> CliProviderKind;
     fn build_command(&self, settings: &CliSettings, prompt: String) -> CliCommand;
+    fn build_json_command(
+        &self,
+        settings: &CliSettings,
+        schema_path: Option<&Path>,
+        prompt: String,
+    ) -> CliCommand;
     fn build_image_command(
         &self,
         settings: &CliSettings,
@@ -90,15 +110,6 @@ pub trait CliBackend: Clone + Send + Sync + 'static {
 pub struct CliCommand {
     pub program: String,
     pub args: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CliTokenUsage {
-    input_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    reasoning_output_tokens: Option<u64>,
-    total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,11 +129,22 @@ where
         Self { backend, settings }
     }
 
+    async fn run_text(&self, prompt: String) -> Result<String, AiError> {
+        run_cli_text(&self.backend, &self.settings, prompt).await
+    }
+
     async fn run_json<T>(&self, prompt: String) -> Result<T, AiError>
     where
         T: DeserializeOwned + Send + 'static,
     {
         run_cli_json(&self.backend, &self.settings, prompt).await
+    }
+
+    async fn run_json_with_schema<T>(&self, prompt: String, schema: &str) -> Result<T, AiError>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        run_cli_json_with_schema(&self.backend, &self.settings, prompt, schema).await
     }
 
     async fn run_image_json<T>(&self, image_path: PathBuf, prompt: String) -> Result<T, AiError>
@@ -131,6 +153,23 @@ where
     {
         run_cli_image_json(&self.backend, &self.settings, &image_path, prompt).await
     }
+
+    async fn run_conversation(
+        &self,
+        context: &ConversationContext,
+        prompt: String,
+        events: mpsc::UnboundedSender<AiProviderEvent>,
+    ) -> Result<String, AiError> {
+        let mut command = self.backend.build_command(&self.settings, prompt);
+        let image_paths = context
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.mime_type.starts_with("image/"))
+            .filter_map(|attachment| attachment.local_path.as_deref())
+            .collect::<Vec<_>>();
+        add_image_arguments(&mut command, &image_paths);
+        run_cli_command_text_stream(&self.backend, &self.settings, command, events).await
+    }
 }
 
 #[async_trait]
@@ -138,6 +177,43 @@ impl<B> AiProvider for CliAiProvider<B>
 where
     B: CliBackend,
 {
+    async fn respond_to_conversation(
+        &self,
+        context: &ConversationContext,
+        locale: Locale,
+        events: mpsc::UnboundedSender<AiProviderEvent>,
+    ) -> Result<String, AiError> {
+        self.run_conversation(
+            context,
+            conversation_response_prompt(context, locale),
+            events,
+        )
+        .await
+    }
+
+    async fn project_conversation(
+        &self,
+        context: &ConversationContext,
+        assistant_response: &str,
+        locale: Locale,
+    ) -> Result<ConversationProjection, AiError> {
+        let projection: CliConversationProjection = self
+            .run_json_with_schema(
+                conversation_projection_cli_prompt(context, assistant_response, locale),
+                conversation_projection_schema(),
+            )
+            .await?;
+        projection.try_into()
+    }
+
+    async fn respond_to_memo_chat(
+        &self,
+        context: &MemoChatContext,
+        locale: Locale,
+    ) -> Result<String, AiError> {
+        self.run_text(memo_chat_prompt(context, locale)).await
+    }
+
     async fn extract_memo(&self, memo: &Memo, locale: Locale) -> Result<MemoExtraction, AiError> {
         self.run_json(memo_extraction_prompt(memo, locale)).await
     }
@@ -200,6 +276,37 @@ where
 {
     let command_spec = backend.build_command(settings, prompt);
     run_cli_command_json(backend, settings, command_spec).await
+}
+
+async fn run_cli_json_with_schema<T, B>(
+    backend: &B,
+    settings: &CliSettings,
+    prompt: String,
+    schema: &str,
+) -> Result<T, AiError>
+where
+    T: DeserializeOwned,
+    B: CliBackend,
+{
+    let schema_file = TemporaryCliFile::write(
+        "prudentia-conversation-projection-schema",
+        "json",
+        schema.as_bytes(),
+    )?;
+    let command_spec = backend.build_json_command(settings, Some(schema_file.path()), prompt);
+    run_cli_command_json(backend, settings, command_spec).await
+}
+
+async fn run_cli_text<B>(
+    backend: &B,
+    settings: &CliSettings,
+    prompt: String,
+) -> Result<String, AiError>
+where
+    B: CliBackend,
+{
+    let command_spec = backend.build_command(settings, prompt);
+    run_cli_command_text(backend, settings, command_spec).await
 }
 
 async fn run_cli_image_json<T, B>(
@@ -330,21 +437,7 @@ where
     );
 
     let response_text = cli_response_text(stdout.as_ref(), output_last_message.as_ref());
-    let json = extract_json_object(response_text.trim()).ok_or_else(|| {
-        tracing::warn!(
-            invocation_id = %invocation_id,
-            provider = backend.kind().as_str(),
-            program = %command_spec.program,
-            stdout_bytes = output.stdout.len(),
-            "AI CLI command returned no JSON object"
-        );
-        AiError::Provider(format!(
-            "{} CLI did not return a JSON object",
-            backend.kind().as_str()
-        ))
-    })?;
-
-    serde_json::from_str(json).map_err(|err| {
+    parse_json_object(response_text.trim()).map_err(|err| {
         tracing::warn!(
             invocation_id = %invocation_id,
             provider = backend.kind().as_str(),
@@ -353,10 +446,228 @@ where
             "AI CLI JSON parse failed"
         );
         AiError::Provider(format!(
-            "failed to parse {} CLI JSON response: {err}. response: {json}",
+            "failed to parse {} CLI JSON response: {err}",
             backend.kind().as_str()
         ))
     })
+}
+
+async fn run_cli_command_text<B>(
+    backend: &B,
+    settings: &CliSettings,
+    mut command_spec: CliCommand,
+) -> Result<String, AiError>
+where
+    B: CliBackend,
+{
+    let started_at = Instant::now();
+    let invocation_id = Uuid::new_v4();
+    let output_last_message = if backend.kind() == CliProviderKind::Codex {
+        let file = TemporaryCliFile::write("prudentia-cli-last-message", "txt", b"")?;
+        add_codex_json_capture(&mut command_spec, file.path());
+        Some(file)
+    } else {
+        None
+    };
+    let arg_count = command_spec.args.len();
+    tracing::info!(
+        invocation_id = %invocation_id,
+        provider = backend.kind().as_str(),
+        program = %command_spec.program,
+        model = settings.model.as_deref().unwrap_or("default"),
+        profile = settings.profile.as_deref().unwrap_or("default"),
+        arg_count,
+        captures_json_events = command_spec.args.iter().any(|arg| arg == "--json"),
+        "AI CLI text invocation scheduled"
+    );
+
+    let output = Command::new(&command_spec.program)
+        .args(&command_spec.args)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|err| {
+            tracing::warn!(
+                invocation_id = %invocation_id,
+                provider = backend.kind().as_str(),
+                program = %command_spec.program,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                error = %err,
+                "AI CLI text command failed to start"
+            );
+            AiError::Provider(format!(
+                "failed to run {} CLI. {} Error: {err}",
+                backend.kind().as_str(),
+                backend.auth_hint(settings)
+            ))
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log_cli_token_usage(
+            invocation_id,
+            backend.kind(),
+            command_spec.program.as_str(),
+            stdout.as_ref(),
+        );
+        tracing::warn!(
+            invocation_id = %invocation_id,
+            provider = backend.kind().as_str(),
+            program = %command_spec.program,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            status = output.status.code().unwrap_or_default(),
+            stderr_bytes = output.stderr.len(),
+            stdout_bytes = output.stdout.len(),
+            "AI CLI text command exited with failure"
+        );
+        return Err(AiError::Provider(format!(
+            "{} CLI failed. {} stderr: {stderr}",
+            backend.kind().as_str(),
+            backend.auth_hint(settings)
+        )));
+    }
+
+    log_cli_token_usage(
+        invocation_id,
+        backend.kind(),
+        command_spec.program.as_str(),
+        stdout.as_ref(),
+    );
+    tracing::info!(
+        invocation_id = %invocation_id,
+        provider = backend.kind().as_str(),
+        program = %command_spec.program,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        status = output.status.code().unwrap_or_default(),
+        stdout_bytes = output.stdout.len(),
+        stderr_bytes = output.stderr.len(),
+        "AI CLI text command completed"
+    );
+
+    let response_text = cli_response_text(stdout.as_ref(), output_last_message.as_ref())
+        .trim()
+        .to_string();
+    if response_text.is_empty() {
+        return Err(AiError::Provider(format!(
+            "{} CLI returned an empty response",
+            backend.kind().as_str()
+        )));
+    }
+
+    Ok(response_text)
+}
+
+async fn run_cli_command_text_stream<B>(
+    backend: &B,
+    settings: &CliSettings,
+    mut command_spec: CliCommand,
+    events: mpsc::UnboundedSender<AiProviderEvent>,
+) -> Result<String, AiError>
+where
+    B: CliBackend,
+{
+    let started_at = Instant::now();
+    let invocation_id = Uuid::new_v4();
+    let output_last_message = if backend.kind() == CliProviderKind::Codex {
+        let file = TemporaryCliFile::write("prudentia-cli-last-message", "txt", b"")?;
+        add_codex_json_capture(&mut command_spec, file.path());
+        Some(file)
+    } else {
+        None
+    };
+    let _ = events.send(AiProviderEvent::Stage {
+        provider: backend.kind().as_str().to_string(),
+        stage: "process_starting".to_string(),
+    });
+    let mut child = Command::new(&command_spec.program)
+        .args(&command_spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|err| {
+            AiError::Provider(format!(
+                "failed to run {} CLI. {} Error: {err}",
+                backend.kind().as_str(),
+                backend.auth_hint(settings)
+            ))
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AiError::Provider("AI CLI stdout was unavailable".to_string()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AiError::Provider("AI CLI stderr was unavailable".to_string()))?;
+    let stderr_task = tokio::spawn(async move {
+        let mut output = String::new();
+        let _ = stderr.read_to_string(&mut output).await;
+        output
+    });
+    let mut lines = BufReader::new(stdout).lines();
+    let mut stdout_text = String::new();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|err| AiError::Provider(format!("failed to read AI CLI output: {err}")))?
+    {
+        stdout_text.push_str(&line);
+        stdout_text.push('\n');
+        if let Some(stage) = codex_provider_stage(&line) {
+            let _ = events.send(AiProviderEvent::Stage {
+                provider: backend.kind().as_str().to_string(),
+                stage,
+            });
+        }
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|err| AiError::Provider(format!("failed to wait for AI CLI: {err}")))?;
+    let stderr_text = stderr_task.await.unwrap_or_default();
+    if !status.success() {
+        return Err(AiError::Provider(format!(
+            "{} CLI failed. {} stderr: {}",
+            backend.kind().as_str(),
+            backend.auth_hint(settings),
+            stderr_text.trim()
+        )));
+    }
+    log_cli_token_usage(
+        invocation_id,
+        backend.kind(),
+        command_spec.program.as_str(),
+        &stdout_text,
+    );
+    tracing::info!(
+        invocation_id = %invocation_id,
+        provider = backend.kind().as_str(),
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "AI CLI streamed command completed"
+    );
+    let response = cli_response_text(&stdout_text, output_last_message.as_ref())
+        .trim()
+        .to_string();
+    if response.is_empty() {
+        return Err(AiError::Provider(format!(
+            "{} CLI returned an empty response",
+            backend.kind().as_str()
+        )));
+    }
+    Ok(response)
+}
+
+fn add_image_arguments(command: &mut CliCommand, image_paths: &[&str]) {
+    let insert_at = command.args.len().saturating_sub(1);
+    for (offset, path) in image_paths.iter().enumerate() {
+        let index = insert_at + offset * 2;
+        command.args.insert(index, "--image".to_string());
+        command.args.insert(index + 1, (*path).to_string());
+    }
 }
 
 fn add_codex_json_capture(command: &mut CliCommand, output_last_message_path: &Path) {
@@ -404,124 +715,6 @@ fn codex_last_agent_message(output: &str) -> Option<String> {
     last_message
 }
 
-fn log_cli_token_usage(
-    invocation_id: Uuid,
-    provider: CliProviderKind,
-    program: &str,
-    output: &str,
-) {
-    let json_event_count = output
-        .lines()
-        .filter(|line| serde_json::from_str::<serde_json::Value>(line.trim()).is_ok())
-        .count();
-
-    if let Some(usage) = parse_cli_token_usage(output) {
-        tracing::info!(
-            invocation_id = %invocation_id,
-            provider = provider.as_str(),
-            program,
-            token_usage_available = true,
-            input_tokens = usage.input_tokens.unwrap_or_default(),
-            cached_input_tokens = usage.cached_input_tokens.unwrap_or_default(),
-            output_tokens = usage.output_tokens.unwrap_or_default(),
-            reasoning_output_tokens = usage.reasoning_output_tokens.unwrap_or_default(),
-            total_tokens = usage.total_tokens.unwrap_or_default(),
-            json_event_count,
-            "AI CLI token usage"
-        );
-    } else {
-        tracing::info!(
-            invocation_id = %invocation_id,
-            provider = provider.as_str(),
-            program,
-            token_usage_available = false,
-            json_event_count,
-            "AI CLI token usage unavailable"
-        );
-    }
-}
-
-fn parse_cli_token_usage(output: &str) -> Option<CliTokenUsage> {
-    let mut usage = None;
-
-    for line in output.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-
-        if value.get("type").and_then(|field| field.as_str()) == Some("turn.completed") {
-            if let Some(parsed) = value.get("usage").and_then(CliTokenUsage::from_value) {
-                usage = Some(parsed);
-            }
-            continue;
-        }
-
-        if value.get("type").and_then(|field| field.as_str()) == Some("event_msg") {
-            let Some(payload) = value.get("payload") else {
-                continue;
-            };
-            if payload.get("type").and_then(|field| field.as_str()) != Some("token_count") {
-                continue;
-            }
-            let parsed = payload
-                .get("info")
-                .and_then(|info| info.get("last_token_usage"))
-                .and_then(CliTokenUsage::from_value)
-                .or_else(|| {
-                    payload
-                        .get("info")
-                        .and_then(|info| info.get("total_token_usage"))
-                        .and_then(CliTokenUsage::from_value)
-                });
-            if let Some(parsed) = parsed {
-                usage = Some(parsed);
-            }
-        }
-    }
-
-    usage
-}
-
-impl CliTokenUsage {
-    fn from_value(value: &serde_json::Value) -> Option<Self> {
-        let input_tokens = number_field(value, &["input_tokens", "prompt_tokens"]);
-        let cached_input_tokens =
-            number_field(value, &["cached_input_tokens", "cached_prompt_tokens"]);
-        let output_tokens = number_field(value, &["output_tokens", "completion_tokens"]);
-        let reasoning_output_tokens =
-            number_field(value, &["reasoning_output_tokens", "reasoning_tokens"]);
-        let total_tokens = number_field(value, &["total_tokens"]).or_else(|| {
-            input_tokens
-                .zip(output_tokens)
-                .map(|(input, output)| input + output)
-        });
-
-        let usage = Self {
-            input_tokens,
-            cached_input_tokens,
-            output_tokens,
-            reasoning_output_tokens,
-            total_tokens,
-        };
-
-        if usage.input_tokens.is_some()
-            || usage.cached_input_tokens.is_some()
-            || usage.output_tokens.is_some()
-            || usage.reasoning_output_tokens.is_some()
-            || usage.total_tokens.is_some()
-        {
-            Some(usage)
-        } else {
-            None
-        }
-    }
-}
-
-fn number_field(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(|field| field.as_u64()))
-}
-
 struct TemporaryCliFile {
     path: PathBuf,
 }
@@ -548,32 +741,9 @@ impl Drop for TemporaryCliFile {
     }
 }
 
-pub mod codex;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_codex_json_usage_from_turn_completed_event() {
-        let output = r#"{"type":"thread.started","thread_id":"thread-1"}
-{"type":"turn.completed","usage":{"input_tokens":14785,"cached_input_tokens":5504,"output_tokens":427,"reasoning_output_tokens":416}}"#;
-
-        let usage = parse_cli_token_usage(output).expect("usage should be parsed");
-
-        assert_eq!(usage.input_tokens, Some(14785));
-        assert_eq!(usage.cached_input_tokens, Some(5504));
-        assert_eq!(usage.output_tokens, Some(427));
-        assert_eq!(usage.reasoning_output_tokens, Some(416));
-        assert_eq!(usage.total_tokens, Some(15212));
-    }
-
-    #[test]
-    fn missing_cli_usage_returns_none() {
-        let output = r#"{"type":"thread.started","thread_id":"thread-1"}"#;
-
-        assert_eq!(parse_cli_token_usage(output), None);
-    }
 
     #[test]
     fn codex_json_capture_options_are_inserted_before_prompt() {

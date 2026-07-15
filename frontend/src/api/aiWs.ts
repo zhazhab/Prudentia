@@ -10,16 +10,46 @@ export type AiWsClientMessage =
       payload: ImagePayload;
     }
   | {
+      type: "memo_chat.start";
+      request_id: string;
+      thread_id?: string;
+      client_thread_id?: string;
+      locale?: string;
+      message: {
+        content: string;
+      };
+      context_hints?: {
+        last_thread_id?: string | null;
+      };
+    }
+  | {
       type: "cancel";
       request_id: string;
     };
 
 export type AiWsServerMessage =
-  | { type: "accepted"; request_id: string }
+  | { type: "accepted"; request_id: string; thread_id?: string | null }
   | { type: "progress"; request_id: string; stage: string }
-  | { type: "completed"; request_id: string; artifact_type: string; data: unknown }
-  | { type: "failed"; request_id: string; code: string; error: string }
-  | { type: "canceled"; request_id: string };
+  | { type: "delta"; request_id: string; thread_id: string; content: string }
+  | { type: "artifact"; request_id: string; thread_id: string; artifact_type: string; data: unknown }
+  | {
+      type: "completed";
+      request_id: string;
+      artifact_type: string;
+      data: unknown;
+      thread_id?: string | null;
+      message_id?: string | null;
+      duration_ms?: number | null;
+    }
+  | {
+      type: "failed";
+      request_id: string;
+      code: string;
+      error: string;
+      thread_id?: string | null;
+      duration_ms?: number | null;
+    }
+  | { type: "canceled"; request_id: string; thread_id?: string | null; duration_ms?: number | null };
 
 export type AiWsMessageHandler = (message: AiWsServerMessage) => void;
 export type AiWebSocketConnection = Pick<AiWebSocketClient, "connect" | "onMessage" | "send" | "close">;

@@ -35,6 +35,29 @@ pub trait MarketDataProvider: Send + Sync {
         from_currency: &str,
         to_currency: &str,
     ) -> Result<ExchangeRate, MarketDataError>;
+
+    async fn exchange_rate_at(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+        rate_date: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        if from_currency
+            .trim()
+            .eq_ignore_ascii_case(to_currency.trim())
+        {
+            return Ok(ExchangeRate {
+                from_currency: from_currency.trim().to_ascii_uppercase(),
+                to_currency: to_currency.trim().to_ascii_uppercase(),
+                rate: 1.0,
+                source: "identity".to_string(),
+                updated_at: rate_date.to_string(),
+            });
+        }
+        Err(MarketDataError::Provider(format!(
+            "historical FX is not supported for {from_currency}/{to_currency} by this provider"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +264,28 @@ impl MarketDataProvider for FallbackMarketDataProvider {
         }
         Err(MarketDataError::Provider(format!(
             "{from_currency}/{to_currency}: all market data providers failed: {}",
+            errors.join("; ")
+        )))
+    }
+
+    async fn exchange_rate_at(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+        rate_date: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        let mut errors = Vec::new();
+        for provider in &self.providers {
+            match provider
+                .exchange_rate_at(from_currency, to_currency, rate_date)
+                .await
+            {
+                Ok(rate) => return Ok(rate),
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        Err(MarketDataError::Provider(format!(
+            "{from_currency}/{to_currency} on {rate_date}: all market data providers failed: {}",
             errors.join("; ")
         )))
     }

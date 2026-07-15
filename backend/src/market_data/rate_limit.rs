@@ -167,6 +167,25 @@ impl MarketDataProvider for RateLimitedMarketDataProvider {
         })
         .await
     }
+
+    async fn exchange_rate_at(
+        &self,
+        from_currency: &str,
+        to_currency: &str,
+        rate_date: &str,
+    ) -> Result<ExchangeRate, MarketDataError> {
+        self.run_limited(|inner| {
+            let from_currency = from_currency.to_string();
+            let to_currency = to_currency.to_string();
+            let rate_date = rate_date.to_string();
+            async move {
+                inner
+                    .exchange_rate_at(&from_currency, &to_currency, &rate_date)
+                    .await
+            }
+        })
+        .await
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

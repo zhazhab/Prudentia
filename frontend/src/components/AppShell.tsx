@@ -3,11 +3,12 @@ import {
   BarChart3,
   BookOpenText,
   Compass,
+  MessagesSquare,
   Settings
 } from "lucide-react";
 import { useI18n, type Locale } from "../i18n";
 
-export type ViewKey = "portfolio" | "memos" | "settings";
+export type ViewKey = "home" | "portfolio" | "memos" | "settings";
 
 interface AppShellProps {
   activeView: ViewKey;
@@ -16,6 +17,7 @@ interface AppShellProps {
 }
 
 const navItems = [
+  { key: "home", labelKey: "nav.home", icon: MessagesSquare },
   { key: "portfolio", labelKey: "nav.portfolio", icon: BarChart3 },
   { key: "memos", labelKey: "nav.memos", icon: BookOpenText },
   { key: "settings", labelKey: "nav.settings", icon: Settings }

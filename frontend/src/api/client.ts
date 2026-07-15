@@ -1,7 +1,14 @@
 import type {
   AiSettings,
+  ConversationAction,
+  ConversationAttachment,
+  ConversationRun,
+  ConversationThreadDetail,
+  ConversationThreadSummary,
   Memo,
   MemoExtraction,
+  MemoThreadDetail,
+  MemoThreadSummary,
   PortfolioDraftCommitRequest,
   PortfolioDraftPreview,
   PortfolioImportMapping,
@@ -11,6 +18,8 @@ import type {
   PortfolioPerformanceResponse,
   PortfolioPosition,
   PriceRefreshResult,
+  StartConversationRunResponse,
+  ThreadSubject,
   PortfolioSummary,
   PortfolioDraftSymbolResolveResult,
   UpdateAiSettings,
@@ -63,7 +72,92 @@ export interface ImagePayload {
 }
 
 export const api = {
+  conversationThreads: () => request<ConversationThreadSummary[]>("/api/conversation/threads"),
+  conversationThread: (id: string, beforeMessageId?: string) =>
+    request<ConversationThreadDetail>(
+      `/api/conversation/threads/${encodeURIComponent(id)}${
+        beforeMessageId ? `?before_message_id=${encodeURIComponent(beforeMessageId)}` : ""
+      }`
+    ),
+  startConversationRun: (payload: {
+    client_request_id: string;
+    thread_id?: string;
+    client_thread_id?: string;
+    content: string;
+    attachment_ids?: string[];
+    locale?: string;
+  }) =>
+    request<StartConversationRunResponse>("/api/conversation/runs", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  activeConversationRuns: () => request<ConversationRun[]>("/api/conversation/runs/active"),
+  cancelConversationRun: (id: string) =>
+    request<ConversationRun>(`/api/conversation/runs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST"
+    }),
+  retryConversationRun: (id: string) =>
+    request<StartConversationRunResponse>(`/api/conversation/runs/${encodeURIComponent(id)}/retry`, {
+      method: "POST"
+    }),
+  updateConversationSubject: (
+    id: string,
+    payload: { kind: string; subject_key?: string | null; label?: string | null }
+  ) =>
+    request<ThreadSubject>(`/api/conversation/threads/${encodeURIComponent(id)}/subject`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  updateConversationAction: (id: string, payload: Record<string, unknown>) =>
+    request<ConversationAction>(`/api/conversation/actions/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ payload })
+    }),
+  confirmConversationAction: (id: string, expectedVersion?: number | null) =>
+    request<ConversationAction>(`/api/conversation/actions/${encodeURIComponent(id)}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ expected_version: expectedVersion ?? null })
+    }),
+  rejectConversationAction: (id: string) =>
+    request<ConversationAction>(`/api/conversation/actions/${encodeURIComponent(id)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({})
+    }),
+  uploadConversationAttachment: (payload: {
+    file_name?: string;
+    mime_type?: string;
+    content?: string;
+    content_encoding?: "base64";
+    url?: string;
+  }) =>
+    request<ConversationAttachment>("/api/conversation/attachments", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  archiveConversationThread: (id: string) =>
+    request<MemoThreadSummary>(`/api/conversation/threads/${encodeURIComponent(id)}/archive`, {
+      method: "POST"
+    }),
+  deleteConversationThread: (id: string) =>
+    request<MemoThreadSummary>(`/api/conversation/threads/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    }),
   memos: () => request<Memo[]>("/api/memos/"),
+  memoThreads: () => request<MemoThreadSummary[]>("/api/memo-threads/"),
+  memoThread: (id: string, beforeMessageId?: string) =>
+    request<MemoThreadDetail>(
+      `/api/memo-threads/${encodeURIComponent(id)}${
+        beforeMessageId ? `?before_message_id=${encodeURIComponent(beforeMessageId)}` : ""
+      }`
+    ),
+  archiveMemoThread: (id: string) =>
+    request<MemoThreadSummary>(`/api/memo-threads/${encodeURIComponent(id)}/archive`, {
+      method: "POST"
+    }),
+  deleteMemoThread: (id: string) =>
+    request<MemoThreadSummary>(`/api/memo-threads/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    }),
   createMemo: (payload: Partial<Memo> & { title: string }) =>
     request<Memo>("/api/memos/", {
       method: "POST",

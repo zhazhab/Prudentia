@@ -11,18 +11,27 @@ use axum::{
 use prudentia_backend::{
     ai::{
         cli::{CliProviderKind, CliSettings},
-        runtime::{AiProviderKind, AiRuntime, AiSettings, UpdateAiSettingsRequest},
+        runtime::{
+            AiProviderKind, AiRuntime, AiSettings, ModelTierSettings, UpdateAiSettingsRequest,
+        },
     },
     ai_ws::{AiWsClientMessage, AiWsServerMessage},
+    config::{AppConfig, WebResearchProviderKind},
+    conversation::{ConversationThreadDetail, StartRunResponse},
     database,
     decision::{self, CreateDecisionRequest},
     decision_delta::{self, DecisionDeltaReviewRequest, RefreshDecisionDeltasRequest},
+    investment_system::{
+        activate_rule_graph, evaluate_active_rule_graph, RuleEdge, RuleGraph, RuleGraphPatch,
+        RuleNode,
+    },
     locale::Locale,
     market_data::{
         mock::MockMarketDataProvider, ExchangeRate, MarketDataError, MarketDataProvider,
         MarketQuote,
     },
     memo::{self, CreateMemoRequest},
+    memo_thread::{self, CreateMemoThreadMessageRequest},
     portfolio::{
         self, PortfolioDraftCommitRequest, PortfolioImageImportPreviewRequest,
         PortfolioImportCommitRequest, PortfolioImportDraftRequest, PortfolioImportPreviewRequest,
@@ -41,6 +50,597 @@ async fn test_pool() -> SqlitePool {
         .expect("connect sqlite");
     database::migrate(&pool).await.expect("migrate");
     pool
+}
+
+#[tokio::test]
+async fn memo_thread_routes_list_detail_archive_and_soft_delete_threads() {
+    let pool = test_pool().await;
+    let thread = memo_thread::create_thread_with_user_message(
+        &pool,
+        CreateMemoThreadMessageRequest {
+            thread_id: None,
+            client_thread_id: Some("client-thread-1".to_string()),
+            content: "复盘腾讯广告复苏假设".to_string(),
+            locale: Locale::Zh,
+        },
+    )
+    .await
+    .expect("create thread");
+
+    let app = startup::build_router(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(MockMarketDataProvider),
+    );
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/memo-threads")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = to_bytes(list_response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let listed: Vec<memo_thread::MemoThreadSummary> = serde_json::from_slice(&body).expect("json");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, thread.id);
+    assert_eq!(listed[0].title, "复盘腾讯广告复苏假设");
+    assert!(listed[0].archived_at.is_none());
+
+    let detail_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/memo-threads/{}", thread.id))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let body = to_bytes(detail_response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let detail: memo_thread::MemoThreadDetail = serde_json::from_slice(&body).expect("json");
+    assert_eq!(detail.thread.id, thread.id);
+    assert_eq!(detail.messages.len(), 1);
+    assert_eq!(
+        detail.messages[0].role,
+        memo_thread::MemoThreadMessageRole::User
+    );
+    assert_eq!(detail.messages[0].content, "复盘腾讯广告复苏假设");
+
+    let archive_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/memo-threads/{}/archive", thread.id))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(archive_response.status(), StatusCode::OK);
+
+    let list_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/memo-threads")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let body = to_bytes(list_response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let listed: Vec<memo_thread::MemoThreadSummary> = serde_json::from_slice(&body).expect("json");
+    assert!(listed.is_empty());
+
+    let delete_response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/memo-threads/{}", thread.id))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+    assert!(memo_thread::get_detail(&pool, &thread.id, 50, None)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn conversation_run_persists_events_and_natural_assistant_message() {
+    let pool = test_pool().await;
+    let app = startup::build_router(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(MockMarketDataProvider),
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "client_request_id":"conversation-test-1",
+                      "client_thread_id":"client-conversation-test-1",
+                      "content":"你好",
+                      "locale":"zh-CN"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let accepted: StartRunResponse = serde_json::from_slice(&body).expect("json");
+
+    let mut detail = None;
+    for _ in 0..30 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/conversation/threads/{}",
+                        accepted.thread.thread.id
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let current: ConversationThreadDetail = serde_json::from_slice(&body).expect("json");
+        if current.thread.active_run.is_none() {
+            detail = Some(current);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let detail = detail.expect("conversation should complete");
+    assert_eq!(detail.messages.len(), 2);
+    assert_eq!(detail.messages[0].content, "你好");
+    assert!(!detail.messages[1].content.is_empty());
+    assert_ne!(detail.messages[1].content, "...");
+    assert_eq!(
+        detail.latest_run.as_ref().map(|run| run.status.as_str()),
+        Some("completed")
+    );
+    let latest_run = detail.latest_run.as_ref().expect("latest run");
+    assert_eq!(latest_run.task_complexity.as_deref(), Some("simple"));
+    assert_eq!(latest_run.model.as_deref(), Some("mock"));
+    assert_eq!(latest_run.route_reason.as_deref(), Some("social_turn"));
+    assert_eq!(latest_run.activity.as_deref(), Some("generating"));
+    assert_eq!(latest_run.source_count, Some(0));
+
+    let event_types = sqlx::query_scalar::<_, String>(
+        "SELECT event_type FROM conversation_run_events WHERE run_id = ? ORDER BY event_id",
+    )
+    .bind(&accepted.run.id)
+    .fetch_all(&pool)
+    .await
+    .expect("events");
+    assert!(event_types.contains(&"run.accepted".to_string()));
+    assert!(event_types.contains(&"run.classified".to_string()));
+    assert!(event_types.contains(&"run.routed".to_string()));
+    assert!(event_types.contains(&"message.completed".to_string()));
+    assert!(event_types.contains(&"run.completed".to_string()));
+    assert!(
+        !event_types.contains(&"message.delta".to_string()),
+        "terminal runs should compact deltas already represented by the final message"
+    );
+
+    let routed_model = sqlx::query_scalar::<_, String>(
+        r#"SELECT json_extract(payload_json, '$.run.model')
+        FROM conversation_run_events
+        WHERE run_id = ? AND event_type = 'run.routed'"#,
+    )
+    .bind(&accepted.run.id)
+    .fetch_one(&pool)
+    .await
+    .expect("routed run snapshot");
+    assert_eq!(routed_model, "mock");
+
+    let phases = sqlx::query_scalar::<_, String>(
+        r#"SELECT json_extract(payload_json, '$.phase')
+        FROM conversation_run_events
+        WHERE run_id = ? AND event_type = 'run.phase'
+        ORDER BY event_id"#,
+    )
+    .bind(&accepted.run.id)
+    .fetch_all(&pool)
+    .await
+    .expect("run phases");
+    assert!(
+        !phases.contains(&"extracting_actions".to_string()),
+        "casual greetings must not start a second action-projection model call"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_company_turn_asks_for_confirmation_without_bound_company_context() {
+    let pool = test_pool().await;
+    sqlx::query(
+        r#"INSERT INTO security_symbols (symbol, name, market, currency, updated_at) VALUES
+        ('9988.HK', '阿里巴巴－Ｗ', 'HK', 'HKD', '2026-01-01T00:00:00Z'),
+        ('0241.HK', '阿里健康', 'HK', 'HKD', '2026-01-01T00:00:00Z')"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert ambiguous companies");
+    let mut config = AppConfig::from_env();
+    config.web_research_provider = WebResearchProviderKind::Disabled;
+    let app = startup::build_router_with_config(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(MockMarketDataProvider),
+        &config,
+    );
+
+    let seed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "client_request_id":"clarification-seed",
+                      "client_thread_id":"clarification-thread",
+                      "content":"你好",
+                      "locale":"zh-CN"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("seed response");
+    let body = to_bytes(seed.into_body(), 1024 * 1024)
+        .await
+        .expect("seed body");
+    let accepted: StartRunResponse = serde_json::from_slice(&body).expect("seed json");
+    let thread_id = accepted.thread.thread.id;
+    wait_for_conversation(&app, &thread_id).await;
+
+    let subject = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/conversation/threads/{thread_id}/subject"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"company","subject_key":"PDD","label":"拼多多"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("subject response");
+    assert_eq!(subject.status(), StatusCode::OK);
+    let summary_before =
+        sqlx::query_scalar::<_, String>("SELECT summary FROM memo_threads WHERE id = ?")
+            .bind(&thread_id)
+            .fetch_one(&pool)
+            .await
+            .expect("bound summary");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                      "client_request_id":"ambiguous-company-turn",
+                      "thread_id":"{thread_id}",
+                      "content":"分析一下阿里",
+                      "locale":"zh-CN"
+                    }}"#,
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("clarification response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("clarification body");
+    let clarification_run: StartRunResponse = serde_json::from_slice(&body).expect("run json");
+    let detail = wait_for_conversation(&app, &thread_id).await;
+    let run = detail.latest_run.as_ref().expect("latest run");
+    let assistant = detail.messages.last().expect("assistant message");
+
+    assert_eq!(
+        run.status, "completed",
+        "clarification run failed: {:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert_eq!(run.task_complexity.as_deref(), Some("simple"));
+    assert_eq!(run.route_reason.as_deref(), Some("subject_clarification"));
+    assert_eq!(run.source_count, Some(0));
+    assert!(assistant.content.contains("请确认"));
+    assert!(assistant.sources.is_empty());
+    assert_eq!(assistant.used_context.len(), 1);
+    assert_eq!(
+        assistant.used_context[0]
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some("subject_clarification")
+    );
+    assert_eq!(
+        assistant.used_context[0]
+            .get("original_request")
+            .and_then(serde_json::Value::as_str),
+        Some("分析一下阿里")
+    );
+    assert_eq!(
+        assistant.used_context[0]
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    assert!(!assistant
+        .used_context
+        .iter()
+        .any(|context| context.to_string().contains("PDD")));
+    assert_eq!(detail.thread.subject.subject_key.as_deref(), Some("PDD"));
+    assert_eq!(detail.thread.thread.summary, summary_before);
+    let source_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM conversation_sources WHERE run_id = ?")
+            .bind(&clarification_run.run.id)
+            .fetch_one(&pool)
+            .await
+            .expect("source count");
+    assert_eq!(source_count, 0);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                      "client_request_id":"confirmed-company-turn",
+                      "thread_id":"{thread_id}",
+                      "content":"9988.HK",
+                      "locale":"zh-CN"
+                    }}"#,
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("confirmation response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let detail = wait_for_conversation(&app, &thread_id).await;
+    let run = detail.latest_run.as_ref().expect("confirmed run");
+    let assistant = detail.messages.last().expect("confirmed assistant");
+    let run_events = sqlx::query_as::<_, (String, String)>(
+        "SELECT event_type, payload_json FROM conversation_run_events WHERE run_id = ? ORDER BY event_id",
+    )
+    .bind(&run.id)
+    .fetch_all(&pool)
+    .await
+    .expect("confirmed run events");
+
+    assert_eq!(
+        run.status, "completed",
+        "confirmed run failed: {:?} {:?}; events: {:?}",
+        run.error_code, run.error_message, run_events
+    );
+    assert_ne!(run.route_reason.as_deref(), Some("subject_clarification"));
+    assert!(assistant.used_context.iter().any(|context| {
+        context.get("kind").and_then(serde_json::Value::as_str) == Some("company")
+            && context.get("label").and_then(serde_json::Value::as_str) == Some("9988.HK")
+    }));
+    assert!(!assistant
+        .used_context
+        .iter()
+        .any(|context| context.to_string().contains("PDD")));
+    assert_eq!(detail.thread.subject.subject_key.as_deref(), Some("PDD"));
+}
+
+async fn wait_for_conversation(app: &axum::Router, thread_id: &str) -> ConversationThreadDetail {
+    for _ in 0..50 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/conversation/threads/{thread_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("thread response");
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("thread body");
+        let detail: ConversationThreadDetail = serde_json::from_slice(&body).expect("thread json");
+        if detail.thread.active_run.is_none() {
+            return detail;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("conversation should complete");
+}
+
+#[tokio::test]
+async fn conversation_trade_uses_import_baseline_and_weighted_average_cost() {
+    let pool = test_pool().await;
+    let preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: sample_import_content(),
+        content_encoding: None,
+    })
+    .expect("preview");
+    portfolio::commit_import(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: sample_import_content(),
+            content_encoding: None,
+            mapping: preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("commit");
+
+    let historical = portfolio::record_trade(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        portfolio::TradeRecord {
+            side: "buy".to_string(),
+            symbol: "AAPL".to_string(),
+            quantity: 10.0,
+            price: 50.0,
+            currency: "USD".to_string(),
+            occurred_at: "2020-01-01".to_string(),
+            fees: 0.0,
+            account: None,
+            notes: None,
+            fx_rate: Some(7.0),
+            fx_source: Some("test".to_string()),
+            corrects_trade_id: None,
+        },
+        None,
+    )
+    .await
+    .expect("historical trade");
+    assert!(!historical.impacts_portfolio);
+
+    let receipt = portfolio::record_trade(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        portfolio::TradeRecord {
+            side: "buy".to_string(),
+            symbol: "AAPL".to_string(),
+            quantity: 1.0,
+            price: 110.0,
+            currency: "USD".to_string(),
+            occurred_at: "2030-01-01".to_string(),
+            fees: 3.0,
+            account: None,
+            notes: None,
+            fx_rate: Some(7.0),
+            fx_source: Some("test".to_string()),
+            corrects_trade_id: None,
+        },
+        None,
+    )
+    .await
+    .expect("new trade");
+    assert!(receipt.impacts_portfolio);
+    let position = receipt.position.expect("position");
+    assert_eq!(position.quantity, 3.0);
+    assert!((position.average_cost - (313.0 / 3.0)).abs() < 0.000001);
+    assert_eq!(receipt.amount_base, Some(791.0));
+}
+
+#[tokio::test]
+async fn rule_graph_activates_a_validated_executable_version() {
+    let pool = test_pool().await;
+    let graph = RuleGraph {
+        graph_id: "default".to_string(),
+        name: "Valuation gate".to_string(),
+        nodes: vec![
+            RuleNode {
+                id: "pe".to_string(),
+                label: "PE".to_string(),
+                kind: "fixed".to_string(),
+                operation: "input".to_string(),
+                config: serde_json::json!({ "key": "pe" }),
+                input_schema: serde_json::Value::Null,
+                output_schema: serde_json::json!({ "type": "number" }),
+                x: 0.0,
+                y: 0.0,
+            },
+            RuleNode {
+                id: "gate".to_string(),
+                label: "PE <= 20".to_string(),
+                kind: "fixed".to_string(),
+                operation: "compare".to_string(),
+                config: serde_json::json!({ "operator": "lte", "value": 20.0 }),
+                input_schema: serde_json::Value::Null,
+                output_schema: serde_json::json!({ "type": "boolean" }),
+                x: 120.0,
+                y: 0.0,
+            },
+            RuleNode {
+                id: "result".to_string(),
+                label: "Result".to_string(),
+                kind: "fixed".to_string(),
+                operation: "output".to_string(),
+                config: serde_json::Value::Null,
+                input_schema: serde_json::Value::Null,
+                output_schema: serde_json::json!({ "type": "boolean" }),
+                x: 240.0,
+                y: 0.0,
+            },
+        ],
+        edges: vec![
+            RuleEdge {
+                id: "pe-gate".to_string(),
+                from_node: "pe".to_string(),
+                to_node: "gate".to_string(),
+                condition: None,
+            },
+            RuleEdge {
+                id: "gate-result".to_string(),
+                from_node: "gate".to_string(),
+                to_node: "result".to_string(),
+                condition: None,
+            },
+        ],
+    };
+    let version = activate_rule_graph(
+        &pool,
+        RuleGraphPatch {
+            base_version: 1,
+            graph,
+        },
+        None,
+    )
+    .await
+    .expect("activate graph");
+    assert_eq!(version.version, 2);
+    let evaluation = evaluate_active_rule_graph(&pool, serde_json::json!({ "pe": 18.0 }))
+        .await
+        .expect("evaluate graph");
+    assert_eq!(evaluation.output, serde_json::Value::Bool(true));
 }
 
 #[tokio::test]
@@ -122,6 +722,57 @@ fn ai_ws_messages_round_trip_portfolio_image_import() {
     assert_eq!(serialized["type"], "progress");
     assert_eq!(serialized["request_id"], "req-1");
     assert_eq!(serialized["stage"], "recognizing_image");
+}
+
+#[test]
+fn ai_ws_messages_round_trip_memo_chat_events() {
+    let parsed: AiWsClientMessage = serde_json::from_value(serde_json::json!({
+        "type": "memo_chat.start",
+        "request_id": "chat-1",
+        "client_thread_id": "client-thread-1",
+        "locale": "zh-CN",
+        "message": {
+            "content": "复盘腾讯"
+        },
+        "context_hints": {
+            "last_thread_id": "last-thread"
+        }
+    }))
+    .expect("client message");
+
+    match parsed {
+        AiWsClientMessage::MemoChatStart {
+            request_id,
+            thread_id,
+            client_thread_id,
+            locale,
+            message,
+            context_hints,
+        } => {
+            assert_eq!(request_id, "chat-1");
+            assert!(thread_id.is_none());
+            assert_eq!(client_thread_id.as_deref(), Some("client-thread-1"));
+            assert_eq!(locale.as_deref(), Some("zh-CN"));
+            assert_eq!(message.content, "复盘腾讯");
+            assert_eq!(
+                context_hints.and_then(|hints| hints.last_thread_id),
+                Some("last-thread".to_string())
+            );
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+
+    let serialized = serde_json::to_value(AiWsServerMessage::Delta {
+        request_id: "chat-1".to_string(),
+        thread_id: "thread-1".to_string(),
+        content: "第一段".to_string(),
+    })
+    .expect("server message");
+
+    assert_eq!(serialized["type"], "delta");
+    assert_eq!(serialized["request_id"], "chat-1");
+    assert_eq!(serialized["thread_id"], "thread-1");
+    assert_eq!(serialized["content"], "第一段");
 }
 
 async fn table_names(pool: &SqlitePool) -> Vec<String> {
@@ -480,6 +1131,84 @@ async fn portfolio_performance_uses_snapshots_and_benchmark_proxies() {
         .benchmarks
         .iter()
         .all(|benchmark| benchmark.annualized_return_pct == Some(0.0)));
+
+    let serialized = serde_json::to_value(&performance).expect("serialized performance");
+    let benchmark = serialized["benchmarks"]
+        .as_array()
+        .expect("benchmarks")
+        .iter()
+        .find(|benchmark| benchmark["key"] == "sp500")
+        .expect("sp500 benchmark");
+    assert_eq!(benchmark["source"], "static-fx-test");
+    assert_eq!(benchmark["series"][0]["source"], "static-fx-test");
+}
+
+#[tokio::test]
+async fn portfolio_performance_restarts_after_all_positions_are_deleted() {
+    let pool = test_pool().await;
+    let first_content = sample_import_content();
+    let first_preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: first_content.clone(),
+        content_encoding: None,
+    })
+    .expect("first preview");
+    portfolio::commit_import(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: first_content,
+            content_encoding: None,
+            mapping: first_preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("first commit");
+
+    portfolio::delete_position(&pool, Arc::new(MockMarketDataProvider), "AAPL")
+        .await
+        .expect("delete AAPL");
+    portfolio::delete_position(&pool, Arc::new(MockMarketDataProvider), "MSFT")
+        .await
+        .expect("delete MSFT");
+
+    let second_content = [
+        "symbol,name,quantity,average cost,currency,sector,market value",
+        "PDD,PDD Holdings,1,900,USD,Consumer,1000",
+    ]
+    .join("\n");
+    let second_preview = portfolio::preview(PortfolioImportPreviewRequest {
+        file_name: "positions.csv".to_string(),
+        content: second_content.clone(),
+        content_encoding: None,
+    })
+    .expect("second preview");
+    portfolio::commit_import(
+        &pool,
+        Arc::new(MockMarketDataProvider),
+        PortfolioImportCommitRequest {
+            file_name: "positions.csv".to_string(),
+            content: second_content,
+            content_encoding: None,
+            mapping: second_preview.suggested_mapping,
+        },
+    )
+    .await
+    .expect("second commit");
+
+    let performance = portfolio::portfolio_performance(
+        &pool,
+        portfolio::PortfolioPerformanceQuery {
+            period: Some("month".to_string()),
+        },
+    )
+    .await
+    .expect("performance");
+
+    assert_eq!(performance.series.len(), 1);
+    assert_eq!(performance.portfolio.profit_loss_base, Some(0.0));
+    assert_eq!(performance.portfolio.return_pct, Some(0.0));
 }
 
 #[tokio::test]
@@ -1649,10 +2378,13 @@ async fn research_routes_create_and_list_distillations() {
     let ai = Arc::new(AiRuntime::new(
         AiSettings {
             provider: AiProviderKind::Mock,
+            provider_chain: vec![AiProviderKind::Mock],
             openai_api_key: None,
             openai_base_url: "https://api.openai.com/v1".to_string(),
             openai_model: "gpt-4.1-mini".to_string(),
+            openai_models: model_tiers("gpt-4.1-mini"),
             cli: CliSettings::default(),
+            cli_models: model_tiers("gpt-5.4"),
         },
         ".env",
     ));
@@ -2299,15 +3031,18 @@ fn ai_settings_update_can_persist_env_without_echoing_secret() {
     let runtime = AiRuntime::new(
         AiSettings {
             provider: AiProviderKind::Mock,
+            provider_chain: vec![AiProviderKind::Mock],
             openai_api_key: None,
             openai_base_url: "https://api.openai.com/v1".to_string(),
             openai_model: "gpt-4.1-mini".to_string(),
+            openai_models: model_tiers("gpt-4.1-mini"),
             cli: CliSettings {
                 provider: CliProviderKind::Codex,
                 path: "codex".to_string(),
                 model: None,
                 profile: None,
             },
+            cli_models: model_tiers("gpt-5.4"),
         },
         &env_path,
     );
@@ -2318,9 +3053,15 @@ fn ai_settings_update_can_persist_env_without_echoing_secret() {
             openai_api_key: Some("sk-test".to_string()),
             openai_base_url: None,
             openai_model: None,
+            openai_model_simple: None,
+            openai_model_standard: None,
+            openai_model_deep: None,
             cli_provider: Some("codex".to_string()),
             cli_path: Some("codex".to_string()),
             cli_model: Some("gpt-5.4".to_string()),
+            cli_model_simple: None,
+            cli_model_standard: None,
+            cli_model_deep: None,
             cli_profile: Some("personal".to_string()),
             persist_to_env: Some(true),
         })
@@ -2335,7 +3076,36 @@ fn ai_settings_update_can_persist_env_without_echoing_secret() {
     assert!(env.contains("OPENAI_API_KEY=sk-test"));
     assert!(env.contains("AI_CLI_PROVIDER=codex"));
     assert!(env.contains("AI_CLI_MODEL=gpt-5.4"));
+    assert!(env.contains("AI_CLI_MODEL_SIMPLE=gpt-5.4"));
+    assert!(env.contains("AI_CLI_MODEL_STANDARD=gpt-5.4"));
+    assert!(env.contains("AI_CLI_MODEL_DEEP=gpt-5.4"));
     assert!(env.contains("AI_CLI_PROFILE=personal"));
+}
+
+#[tokio::test]
+async fn mock_ai_memo_chat_returns_conversational_response() {
+    let provider = prudentia_backend::ai::mock::MockAiProvider;
+    let response = prudentia_backend::ai::AiProvider::respond_to_memo_chat(
+        &provider,
+        &prudentia_backend::ai::MemoChatContext {
+            thread_title: "腾讯讨论".to_string(),
+            thread_summary: String::new(),
+            user_message: "你怎么看腾讯广告复苏".to_string(),
+            recent_messages: vec![prudentia_backend::ai::MemoChatHistoryMessage {
+                role: "user".to_string(),
+                content: "你怎么看腾讯广告复苏".to_string(),
+            }],
+            portfolio_summary: empty_portfolio_summary(),
+            portfolio_positions: Vec::new(),
+        },
+        Locale::Zh,
+    )
+    .await
+    .expect("mock memo chat");
+
+    assert!(response.contains("我听到了"));
+    assert!(!response.contains("备忘录草稿"));
+    assert!(!response.contains("核心假设"));
 }
 
 #[tokio::test]
@@ -2447,18 +3217,29 @@ fn mock_ai_runtime() -> AiRuntime {
     AiRuntime::new(
         AiSettings {
             provider: AiProviderKind::Mock,
+            provider_chain: vec![AiProviderKind::Mock],
             openai_api_key: None,
             openai_base_url: "https://api.openai.com/v1".to_string(),
             openai_model: "gpt-4.1-mini".to_string(),
+            openai_models: model_tiers("gpt-4.1-mini"),
             cli: CliSettings {
                 provider: CliProviderKind::Codex,
                 path: "codex".to_string(),
                 model: None,
                 profile: None,
             },
+            cli_models: model_tiers("gpt-5.4"),
         },
         ".env.test",
     )
+}
+
+fn model_tiers(model: &str) -> ModelTierSettings {
+    ModelTierSettings {
+        simple: model.to_string(),
+        standard: model.to_string(),
+        deep: model.to_string(),
+    }
 }
 
 fn assert_research_analysis_arrays_non_empty(analysis: &prudentia_backend::ai::ResearchAnalysis) {
