@@ -16,9 +16,15 @@ export function SettingsPage() {
     provider: "mock",
     openai_base_url: "https://api.openai.com/v1",
     openai_model: "gpt-4.1-mini",
+    openai_model_simple: "gpt-4.1-mini",
+    openai_model_standard: "gpt-4.1-mini",
+    openai_model_deep: "gpt-4.1-mini",
     cli_provider: "codex",
     cli_path: "codex",
     cli_model: "",
+    cli_model_simple: "gpt-5.6-luna",
+    cli_model_standard: "gpt-5.6-terra",
+    cli_model_deep: "gpt-5.6-sol",
     cli_profile: "",
     openai_api_key: "",
     persist_to_env: true
@@ -34,9 +40,15 @@ export function SettingsPage() {
       provider: settings.data.provider,
       openai_base_url: settings.data.openai_base_url,
       openai_model: settings.data.openai_model,
+      openai_model_simple: settings.data.openai_model_simple,
+      openai_model_standard: settings.data.openai_model_standard,
+      openai_model_deep: settings.data.openai_model_deep,
       cli_provider: settings.data.cli_provider,
       cli_path: settings.data.cli_path,
       cli_model: settings.data.cli_model ?? "",
+      cli_model_simple: settings.data.cli_model_simple,
+      cli_model_standard: settings.data.cli_model_standard,
+      cli_model_deep: settings.data.cli_model_deep,
       cli_profile: settings.data.cli_profile ?? "",
       openai_api_key: "",
       persist_to_env: true
@@ -54,7 +66,7 @@ export function SettingsPage() {
   function submit(event: FormEvent) {
     event.preventDefault();
     setSaved(false);
-    save.mutate(aiSettingsPayload(draft));
+    save.mutate(aiSettingsPayload(draft, settings.data?.provider_chain));
   }
 
   return (
@@ -91,11 +103,27 @@ export function SettingsPage() {
                 />
               </label>
               <label>
-                <span>{t("settings.openaiModel")}</span>
+                <span>{t("settings.modelSimple")}</span>
                 <input
                   required
-                  value={draft.openai_model ?? ""}
-                  onChange={(event) => setDraft({ ...draft, openai_model: event.target.value })}
+                  value={draft.openai_model_simple ?? ""}
+                  onChange={(event) => setDraft({ ...draft, openai_model_simple: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t("settings.modelStandard")}</span>
+                <input
+                  required
+                  value={draft.openai_model_standard ?? ""}
+                  onChange={(event) => setDraft({ ...draft, openai_model_standard: event.target.value })}
+                />
+              </label>
+              <label>
+                <span>{t("settings.modelDeep")}</span>
+                <input
+                  required
+                  value={draft.openai_model_deep ?? ""}
+                  onChange={(event) => setDraft({ ...draft, openai_model_deep: event.target.value })}
                 />
               </label>
               <label>
@@ -111,6 +139,7 @@ export function SettingsPage() {
                 </em>
               </label>
             </div>
+            <em className="field-help">{t("settings.modelRoutingHelp")}</em>
           </div>
         ) : null}
 
@@ -137,10 +166,27 @@ export function SettingsPage() {
               <summary>{t("settings.cliAdvanced")}</summary>
               <div className="settings-grid">
                 <label>
-                  <span>{t("settings.cliModel")}</span>
+                  <span>{t("settings.modelSimple")}</span>
                   <input
-                    value={draft.cli_model ?? ""}
-                    onChange={(event) => setDraft({ ...draft, cli_model: event.target.value })}
+                    required
+                    value={draft.cli_model_simple ?? ""}
+                    onChange={(event) => setDraft({ ...draft, cli_model_simple: event.target.value })}
+                  />
+                </label>
+                <label>
+                  <span>{t("settings.modelStandard")}</span>
+                  <input
+                    required
+                    value={draft.cli_model_standard ?? ""}
+                    onChange={(event) => setDraft({ ...draft, cli_model_standard: event.target.value })}
+                  />
+                </label>
+                <label>
+                  <span>{t("settings.modelDeep")}</span>
+                  <input
+                    required
+                    value={draft.cli_model_deep ?? ""}
+                    onChange={(event) => setDraft({ ...draft, cli_model_deep: event.target.value })}
                   />
                 </label>
                 <label>
@@ -151,6 +197,7 @@ export function SettingsPage() {
                   />
                 </label>
               </div>
+              <em className="field-help">{t("settings.modelRoutingHelp")}</em>
             </details>
           </div>
         ) : null}

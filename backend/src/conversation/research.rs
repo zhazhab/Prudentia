@@ -5,6 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
+use tokio::sync::mpsc;
 
 use crate::{
     ai::ConversationResearchSource,
@@ -13,22 +14,56 @@ use crate::{
     time::now_iso,
 };
 
-use super::types::ThreadSubject;
-
+mod planner;
 mod public_sources;
 mod source_validation;
+use planner::EvidenceCategory;
+pub(super) use planner::{plan_research, ResearchPlan};
 use source_validation::{normalize_company_sources, normalize_sources, verify_source_urls};
 
 const RESEARCH_CACHE_TTL: chrono::Duration = chrono::Duration::hours(24);
+const PUBLIC_SOURCES_CACHE_VERSION: &str = "v6-evidence-quality";
 
 #[async_trait]
 pub trait WebResearchProvider: Send + Sync {
     fn name(&self) -> &'static str;
     fn enabled(&self) -> bool;
-    async fn search(
+    /// Must change whenever any plan input or provider behavior can change the persisted outcome.
+    fn cache_identity(&self, plan: &ResearchPlan) -> String {
+        plan.query_cache_identity()
+    }
+    async fn execute(
         &self,
-        request: &CompanyResearchRequest,
+        plan: &ResearchPlan,
+        progress: mpsc::UnboundedSender<ResearchProgress>,
     ) -> Result<ResearchOutcome, ResearchError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResearchProgress {
+    CheckingCache,
+    CacheHit,
+    FetchingPublicSources,
+    FetchingFinancialHistory,
+    VerifyingSources,
+    SearchingOfficial,
+    SearchingIndependent,
+    SearchingCommunity,
+}
+
+impl ResearchProgress {
+    pub(super) fn code(self) -> &'static str {
+        match self {
+            Self::CheckingCache => "research_checking_cache",
+            Self::CacheHit => "research_cache_hit",
+            Self::FetchingPublicSources => "research_fetching_public_sources",
+            Self::FetchingFinancialHistory => "research_fetching_financial_history",
+            Self::VerifyingSources => "research_verifying_sources",
+            Self::SearchingOfficial => "research_searching_official",
+            Self::SearchingIndependent => "research_searching_independent",
+            Self::SearchingCommunity => "research_searching_community",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -49,22 +84,7 @@ pub struct ResearchOutcome {
     pub warning: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EvidenceCategory {
-    Official,
-    Independent,
-    Community,
-}
-
 impl EvidenceCategory {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Official => "official filings",
-            Self::Independent => "independent analysis",
-            Self::Community => "community viewpoints",
-        }
-    }
-
     fn accepts(self, source: &ConversationResearchSource) -> bool {
         match self {
             Self::Official => source.source_tier == "primary",
@@ -72,19 +92,6 @@ impl EvidenceCategory {
             Self::Community => source.source_tier == "community",
         }
     }
-
-    fn source_tier(self) -> &'static str {
-        match self {
-            Self::Official => "primary",
-            Self::Independent => "secondary",
-            Self::Community => "community",
-        }
-    }
-}
-
-struct PlannedResearchQuery {
-    category: EvidenceCategory,
-    text: String,
 }
 
 fn incomplete_research_warning(categories: &[EvidenceCategory]) -> Option<String> {
@@ -124,17 +131,21 @@ pub fn provider_from_config(config: &AppConfig) -> Arc<dyn WebResearchProvider> 
     }
 }
 
-pub async fn search_with_cache(
+pub(super) async fn execute_with_cache(
     pool: &SqlitePool,
     provider: Arc<dyn WebResearchProvider>,
-    request: &CompanyResearchRequest,
+    plan: &ResearchPlan,
+    progress: mpsc::UnboundedSender<ResearchProgress>,
 ) -> AppResult<ResearchOutcome> {
-    let cache_key = request.cache_key();
-    let hash = query_hash(&format!("{}:{cache_key}", provider.name()));
+    let _ = progress.send(ResearchProgress::CheckingCache);
+    prune_expired_cache(pool).await?;
+    let cache_key = format!("{}:{}", provider.name(), provider.cache_identity(plan));
+    let hash = query_hash(&cache_key);
     if let Some(cached) = load_cache(pool, &hash)
         .await?
         .filter(|outcome| !outcome.sources.is_empty())
     {
+        let _ = progress.send(ResearchProgress::CacheHit);
         return Ok(cached);
     }
     if !provider.enabled() {
@@ -143,7 +154,7 @@ pub async fn search_with_cache(
         ));
     }
     let outcome = provider
-        .search(request)
+        .execute(plan, progress)
         .await
         .map_err(|error| AppError::bad_request(format!("external research failed: {error}")))?;
     let outcome = require_usable_sources(outcome)?;
@@ -171,105 +182,6 @@ fn require_usable_sources(outcome: ResearchOutcome) -> AppResult<ResearchOutcome
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct CompanyResearchRequest {
-    company_name: String,
-    symbol: String,
-    intent: CompanyResearchIntent,
-}
-
-impl CompanyResearchRequest {
-    fn cache_key(&self) -> String {
-        serde_json::to_string(self).expect("company research request is serializable")
-    }
-
-    fn subject_terms(&self) -> String {
-        if self.company_name.eq_ignore_ascii_case(&self.symbol) || self.symbol.is_empty() {
-            self.company_name.clone()
-        } else {
-            format!("{} {}", self.company_name, self.symbol)
-        }
-    }
-
-    fn base_symbol(&self) -> String {
-        self.symbol
-            .split('.')
-            .next()
-            .unwrap_or(self.symbol.as_str())
-            .to_ascii_uppercase()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CompanyResearchIntent {
-    Earnings,
-    News,
-    Valuation,
-    Risk,
-    Fundamentals,
-    General,
-}
-
-impl CompanyResearchIntent {
-    fn query_terms(self) -> &'static str {
-        match self {
-            Self::Earnings => "latest earnings financial results",
-            Self::News => "latest company news announcement",
-            Self::Valuation => "current valuation expectations",
-            Self::Risk => "current business risks competition regulation",
-            Self::Fundamentals => "current fundamentals growth margins cash flow",
-            Self::General => "current company analysis",
-        }
-    }
-}
-
-pub fn plan_research(message: &str, subject: &ThreadSubject) -> Option<CompanyResearchRequest> {
-    if subject.kind != "company" || super::is_simple_social_turn(message) {
-        return None;
-    }
-    let normalized = message.to_ascii_lowercase();
-    let intent = if contains_any(&normalized, &["财报", "业绩", "earnings", "filing"]) {
-        CompanyResearchIntent::Earnings
-    } else if contains_any(&normalized, &["新闻", "公告", "news", "announcement"]) {
-        CompanyResearchIntent::News
-    } else if contains_any(&normalized, &["估值", "valuation"]) {
-        CompanyResearchIntent::Valuation
-    } else if contains_any(
-        &normalized,
-        &["风险", "竞争", "risk", "competition", "regulation"],
-    ) {
-        CompanyResearchIntent::Risk
-    } else if contains_any(
-        &normalized,
-        &[
-            "基本面",
-            "增长",
-            "利润",
-            "收入",
-            "fundamentals",
-            "growth",
-            "margin",
-            "revenue",
-        ],
-    ) {
-        CompanyResearchIntent::Fundamentals
-    } else {
-        CompanyResearchIntent::General
-    };
-    let symbol = subject.subject_key.as_deref().unwrap_or_default();
-    let label = subject.label.as_deref().unwrap_or(symbol);
-    Some(CompanyResearchRequest {
-        company_name: label.to_string(),
-        symbol: symbol.to_string(),
-        intent,
-    })
-}
-
-fn contains_any(value: &str, candidates: &[&str]) -> bool {
-    candidates.iter().any(|candidate| value.contains(candidate))
-}
-
 struct DisabledResearchProvider;
 
 #[async_trait]
@@ -282,9 +194,10 @@ impl WebResearchProvider for DisabledResearchProvider {
         false
     }
 
-    async fn search(
+    async fn execute(
         &self,
-        _request: &CompanyResearchRequest,
+        _plan: &ResearchPlan,
+        _progress: mpsc::UnboundedSender<ResearchProgress>,
     ) -> Result<ResearchOutcome, ResearchError> {
         Err(ResearchError::Disabled)
     }
@@ -304,9 +217,10 @@ impl WebResearchProvider for MisconfiguredResearchProvider {
         true
     }
 
-    async fn search(
+    async fn execute(
         &self,
-        _request: &CompanyResearchRequest,
+        _plan: &ResearchPlan,
+        _progress: mpsc::UnboundedSender<ResearchProgress>,
     ) -> Result<ResearchOutcome, ResearchError> {
         Err(ResearchError::Configuration(self.reason.clone()))
     }
@@ -326,14 +240,28 @@ impl WebResearchProvider for PublicSourcesResearchProvider {
         true
     }
 
-    async fn search(
+    fn cache_identity(&self, plan: &ResearchPlan) -> String {
+        format!(
+            "{PUBLIC_SOURCES_CACHE_VERSION}:{}",
+            plan.subject_cache_identity()
+        )
+    }
+
+    async fn execute(
         &self,
-        request: &CompanyResearchRequest,
+        plan: &ResearchPlan,
+        progress: mpsc::UnboundedSender<ResearchProgress>,
     ) -> Result<ResearchOutcome, ResearchError> {
+        let progress_stage = if plan.annual_history_years().is_some() {
+            ResearchProgress::FetchingFinancialHistory
+        } else {
+            ResearchProgress::FetchingPublicSources
+        };
+        let _ = progress.send(progress_stage);
         let (official, independent, community) = tokio::join!(
-            public_sources::official_filings(&self.client, request),
-            public_sources::independent_news(&self.client, request),
-            public_sources::community_discussions(&self.client, request),
+            public_sources::official_filings(&self.client, plan),
+            public_sources::independent_news(&self.client, plan),
+            public_sources::community_discussions(&self.client, plan),
         );
         let mut failed_categories = Vec::new();
         let official = official.unwrap_or_else(|error| {
@@ -352,11 +280,27 @@ impl WebResearchProvider for PublicSourcesResearchProvider {
             Vec::new()
         });
 
-        let official = verify_source_urls(normalize_sources(official)).await;
-        let independent = verify_source_urls(normalize_sources(independent)).await;
-        let community = verify_source_urls(normalize_sources(community)).await;
+        let _ = progress.send(ResearchProgress::VerifyingSources);
+        let (mut verified_company_facts, official_to_verify): (Vec<_>, Vec<_>) =
+            normalize_sources(official).into_iter().partition(|source| {
+                source
+                    .url
+                    .starts_with("https://data.sec.gov/api/xbrl/companyfacts/")
+            });
+        let (verified_official, independent, community) = tokio::join!(
+            verify_source_urls(official_to_verify),
+            verify_source_urls(normalize_sources(independent)),
+            verify_source_urls(normalize_sources(community)),
+        );
+        verified_company_facts.extend(verified_official);
+        let official = verified_company_facts;
+        let official_incomplete = official.is_empty()
+            || (plan.annual_history_years().is_some()
+                && !official
+                    .iter()
+                    .any(|source| source.url.contains("/api/xbrl/companyfacts/")));
         for (category, is_empty) in [
-            (EvidenceCategory::Official, official.is_empty()),
+            (EvidenceCategory::Official, official_incomplete),
             (EvidenceCategory::Independent, independent.is_empty()),
             (EvidenceCategory::Community, community.is_empty()),
         ] {
@@ -388,13 +332,20 @@ impl WebResearchProvider for TavilyResearchProvider {
         true
     }
 
-    async fn search(
+    async fn execute(
         &self,
-        request: &CompanyResearchRequest,
+        plan: &ResearchPlan,
+        progress: mpsc::UnboundedSender<ResearchProgress>,
     ) -> Result<ResearchOutcome, ResearchError> {
         let mut sources = Vec::new();
         let mut failed_categories = Vec::new();
-        for planned_query in research_queries(request) {
+        for planned_query in plan.queries() {
+            let stage = match planned_query.category {
+                EvidenceCategory::Official => ResearchProgress::SearchingOfficial,
+                EvidenceCategory::Independent => ResearchProgress::SearchingIndependent,
+                EvidenceCategory::Community => ResearchProgress::SearchingCommunity,
+            };
+            let _ = progress.send(stage);
             let results = match self.search_query(&planned_query.text).await {
                 Ok(results) => results,
                 Err(error) => {
@@ -414,8 +365,8 @@ impl WebResearchProvider for TavilyResearchProvider {
                 .collect();
             let verified = verify_source_urls(normalize_company_sources(
                 candidates,
-                &request.company_name,
-                &request.symbol,
+                plan.company_name(),
+                plan.symbol(),
             ))
             .await
             .into_iter()
@@ -452,29 +403,6 @@ impl TavilyResearchProvider {
             .await?;
         Ok(response.results)
     }
-}
-
-fn research_queries(request: &CompanyResearchRequest) -> [PlannedResearchQuery; 3] {
-    let subject = request.subject_terms();
-    let intent = request.intent.query_terms();
-    [
-        PlannedResearchQuery {
-            category: EvidenceCategory::Official,
-            text: format!(
-                "{subject} {intent} official investor relations latest earnings filing announcement"
-            ),
-        },
-        PlannedResearchQuery {
-            category: EvidenceCategory::Independent,
-            text: format!("{subject} {intent} independent analysis risks competition valuation"),
-        },
-        PlannedResearchQuery {
-            category: EvidenceCategory::Community,
-            text: format!(
-                "{subject} {intent} popular investor discussion comments site:xueqiu.com OR site:reddit.com OR site:stocktwits.com OR site:moomoo.com OR site:guba.eastmoney.com"
-            ),
-        },
-    ]
 }
 
 #[derive(Serialize)]
@@ -522,6 +450,18 @@ async fn load_cache(pool: &SqlitePool, hash: &str) -> AppResult<Option<ResearchO
     Ok(Some(outcome))
 }
 
+async fn prune_expired_cache(pool: &SqlitePool) -> AppResult<()> {
+    let cutoff = (chrono::Utc::now() - RESEARCH_CACHE_TTL).to_rfc3339();
+    sqlx::query(
+        r#"DELETE FROM conversation_research_cache
+        WHERE julianday(fetched_at) IS NULL OR julianday(fetched_at) < julianday(?)"#,
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 fn query_hash(query: &str) -> String {
     Sha256::digest(query.trim().as_bytes())
         .iter()
@@ -534,59 +474,47 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        incomplete_research_warning, plan_research, require_usable_sources, research_queries,
-        CompanyResearchRequest, DisabledResearchProvider, EvidenceCategory,
-        MisconfiguredResearchProvider, PublicSourcesResearchProvider, ResearchError,
-        WebResearchProvider, RESEARCH_CACHE_TTL,
+        incomplete_research_warning, plan_research, prune_expired_cache, require_usable_sources,
+        DisabledResearchProvider, EvidenceCategory, MisconfiguredResearchProvider,
+        PublicSourcesResearchProvider, ResearchError, TavilyResearchProvider, WebResearchProvider,
+        RESEARCH_CACHE_TTL,
     };
     use crate::conversation::types::ThreadSubject;
 
-    #[test]
-    fn company_analysis_requests_trigger_external_research() {
-        let company = ThreadSubject {
+    fn pdd_subject() -> ThreadSubject {
+        ThreadSubject {
             kind: "company".to_string(),
             subject_key: Some("PDD".to_string()),
             label: Some("PDD Holdings".to_string()),
             confidence: 0.95,
-        };
-        assert!(plan_research("分析一下 PDD", &company).is_some());
-        assert!(plan_research("What do you think about PDD's margins?", &company).is_some());
-        assert!(plan_research("PDD 值得买吗？", &company).is_some());
-        assert!(plan_research("Should I buy PDD?", &company).is_some());
-        assert!(plan_research("PDD 的护城河是什么？", &company).is_some());
-        assert!(plan_research("你好", &company).is_none());
-        assert!(plan_research("分析一下我的持仓", &ThreadSubject::default()).is_none());
-        let request = plan_research("我持有 587 股，请搜索 PDD 最新财报", &company)
-            .expect("company research request");
-        let queries = research_queries(&request);
-        assert_eq!(queries.len(), 3);
-        assert!(queries
-            .iter()
-            .all(|query| query.text.contains("PDD Holdings PDD")));
-        assert!(queries
-            .iter()
-            .all(|query| query.text.contains("latest earnings")));
-        assert!(queries.iter().all(|query| !query.text.contains("587")));
+        }
     }
 
     #[test]
-    fn research_plans_primary_analysis_and_community_queries() {
-        let company = ThreadSubject {
-            kind: "company".to_string(),
-            subject_key: Some("PDD".to_string()),
-            label: Some("PDD Holdings".to_string()),
-            confidence: 0.95,
+    fn provider_cache_identity_matches_its_execution_scope() {
+        let earnings = plan_research("分析 PDD 最新财报", &pdd_subject()).expect("earnings plan");
+        let valuation = plan_research("分析 PDD 当前估值", &pdd_subject()).expect("valuation plan");
+        let history = plan_research("研究 PDD 近五年财报", &pdd_subject()).expect("history plan");
+        let public_sources = PublicSourcesResearchProvider {
+            client: reqwest::Client::new(),
         };
-        let request = plan_research("分析 PDD 最新财报", &company).expect("research request");
-        let queries = research_queries(&request);
+        let tavily = TavilyResearchProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+        };
 
-        assert_eq!(queries[0].category, EvidenceCategory::Official);
-        assert_eq!(queries[1].category, EvidenceCategory::Independent);
-        assert_eq!(queries[2].category, EvidenceCategory::Community);
-        assert!(queries[0].text.contains("official investor relations"));
-        assert!(queries[1].text.contains("independent analysis"));
-        assert!(queries[2].text.contains("xueqiu.com"));
-        assert!(queries[2].text.contains("reddit.com"));
+        assert_eq!(
+            public_sources.cache_identity(&earnings),
+            public_sources.cache_identity(&valuation)
+        );
+        assert_ne!(
+            public_sources.cache_identity(&earnings),
+            public_sources.cache_identity(&history)
+        );
+        assert_ne!(
+            tavily.cache_identity(&earnings),
+            tavily.cache_identity(&valuation)
+        );
     }
 
     #[test]
@@ -606,6 +534,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_research_cache_rows_are_pruned() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("cache database");
+        sqlx::query(
+            r#"CREATE TABLE conversation_research_cache (
+                query_hash TEXT PRIMARY KEY,
+                query TEXT NOT NULL,
+                results_json TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )"#,
+        )
+        .execute(&pool)
+        .await
+        .expect("cache schema");
+        for (hash, fetched_at) in [
+            (
+                "expired",
+                (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339(),
+            ),
+            ("fresh", chrono::Utc::now().to_rfc3339()),
+        ] {
+            sqlx::query("INSERT INTO conversation_research_cache VALUES (?, ?, '{}', ?)")
+                .bind(hash)
+                .bind(hash)
+                .bind(fetched_at)
+                .execute(&pool)
+                .await
+                .expect("cache row");
+        }
+
+        prune_expired_cache(&pool).await.expect("prune cache");
+
+        let hashes = sqlx::query_scalar::<_, String>(
+            "SELECT query_hash FROM conversation_research_cache ORDER BY query_hash",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("remaining cache rows");
+        assert_eq!(hashes, vec!["fresh"]);
+    }
+
+    #[tokio::test]
     async fn only_explicit_disabled_configuration_turns_research_off() {
         let disabled = DisabledResearchProvider;
         assert!(!disabled.enabled());
@@ -614,12 +587,12 @@ mod tests {
             reason: "unsupported provider".to_string(),
         };
         assert!(invalid.enabled());
-        let request = CompanyResearchRequest {
-            company_name: "PDD Holdings".to_string(),
-            symbol: "PDD".to_string(),
-            intent: super::CompanyResearchIntent::General,
-        };
-        let error = invalid.search(&request).await.expect_err("invalid config");
+        let plan = plan_research("分析 PDD", &pdd_subject()).expect("research plan");
+        let (progress, _events) = tokio::sync::mpsc::unbounded_channel();
+        let error = invalid
+            .execute(&plan, progress)
+            .await
+            .expect_err("invalid config");
         assert!(matches!(error, ResearchError::Configuration(_)));
     }
 
@@ -636,19 +609,15 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires public internet"]
     async fn public_sources_find_live_pdd_evidence() {
-        let company = ThreadSubject {
-            kind: "company".to_string(),
-            subject_key: Some("PDD".to_string()),
-            label: Some("PDD Holdings".to_string()),
-            confidence: 0.95,
-        };
-        let request = plan_research("PDD 最新财报和市场观点", &company).expect("research request");
+        let plan =
+            plan_research("PDD 近五年财报和市场观点", &pdd_subject()).expect("research plan");
         let provider: Arc<dyn WebResearchProvider> = Arc::new(PublicSourcesResearchProvider {
             client: reqwest::Client::new(),
         });
 
+        let (progress, _events) = tokio::sync::mpsc::unbounded_channel();
         let outcome = provider
-            .search(&request)
+            .execute(&plan, progress)
             .await
             .expect("live public sources");
         for source in &outcome.sources {
@@ -659,23 +628,67 @@ mod tests {
             .sources
             .iter()
             .any(|source| source.source_tier == "primary" && source.url.contains("sec.gov")));
+        assert!(outcome.sources.iter().any(|source| {
+            source.url.contains("/api/xbrl/companyfacts/")
+                && source.snippet.contains("2021: revenue")
+                && source.snippet.contains("2025: revenue")
+                && source.snippet.contains("gross profit")
+                && source.snippet.contains("operating income")
+                && source.snippet.contains("selling and marketing expense")
+                && source.snippet.contains("capital expenditure")
+                && source.snippet.contains("share-based compensation")
+                && source.snippet.contains("diluted weighted-average shares")
+                && source
+                    .snippet
+                    .contains("free-cash-flow proxy per diluted share")
+                && source.snippet.contains(
+                    "Excluded diluted weighted-average shares for 2022 as an isolated scale outlier"
+                )
+                && !source
+                    .snippet
+                    .contains("diluted weighted-average shares 5.761 million")
+        }));
         assert!(outcome
             .sources
             .iter()
             .filter(|source| source.source_tier == "primary")
             .any(|source| source.snippet.contains("Filing excerpt:")));
-        assert!(outcome
+        assert!(outcome.sources.iter().any(|source| {
+            source.title.contains("SEC 20-F")
+                && source.url.contains("/Archives/edgar/data/")
+                && source.snippet.contains("Business Overview")
+                && source.snippet.contains("third-party merchants")
+                && source.snippet.contains("transaction services")
+                && source.snippet.contains("Competition evidence:")
+                && source.snippet.contains("Profit-engine evidence:")
+                && source.snippet.contains("Owner-economics evidence:")
+                && source
+                    .snippet
+                    .contains("Management, incentives, and capital-allocation evidence:")
+                && source.snippet.contains("Financial-resilience evidence:")
+                && !source.snippet.contains("XBRL Viewer")
+        }));
+        let has_secondary = outcome
             .sources
             .iter()
-            .filter(|source| source.source_tier == "primary")
-            .any(|source| source.snippet.contains("Total revenues")));
-        assert!(outcome
+            .any(|source| source.source_tier == "secondary");
+        assert!(
+            has_secondary
+                || outcome
+                    .warning
+                    .as_deref()
+                    .is_some_and(|warning| warning.contains("independent analysis"))
+        );
+        let has_community = outcome
             .sources
             .iter()
-            .any(|source| source.source_tier == "secondary"));
-        assert!(outcome
-            .sources
-            .iter()
-            .any(|source| source.source_tier == "community"));
+            .any(|source| source.source_tier == "community");
+        assert!(
+            has_community
+                || outcome
+                    .warning
+                    .as_deref()
+                    .is_some_and(|warning| warning.contains("community viewpoints"))
+        );
     }
 }

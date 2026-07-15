@@ -470,6 +470,11 @@ async fn migrate_conversation_schema(pool: &SqlitePool) -> Result<(), sqlx::Erro
             status TEXT NOT NULL,
             phase TEXT NOT NULL,
             provider TEXT,
+            task_complexity TEXT,
+            model TEXT,
+            route_reason TEXT,
+            activity TEXT,
+            source_count INTEGER,
             error_code TEXT,
             error_message TEXT,
             started_at TEXT NOT NULL,
@@ -493,6 +498,8 @@ async fn migrate_conversation_schema(pool: &SqlitePool) -> Result<(), sqlx::Erro
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL UNIQUE,
             thread_id TEXT NOT NULL,
+            subject_kind TEXT,
+            subject_key TEXT,
             summary TEXT NOT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY(run_id) REFERENCES conversation_runs(id) ON DELETE CASCADE,
@@ -581,6 +588,43 @@ async fn migrate_conversation_schema(pool: &SqlitePool) -> Result<(), sqlx::Erro
     for statement in statements {
         pool.execute(statement).await?;
     }
+    ensure_table_column(pool, "conversation_runs", "task_complexity", "TEXT").await?;
+    ensure_table_column(pool, "conversation_runs", "model", "TEXT").await?;
+    ensure_table_column(pool, "conversation_runs", "route_reason", "TEXT").await?;
+    ensure_table_column(pool, "conversation_runs", "activity", "TEXT").await?;
+    ensure_table_column(pool, "conversation_runs", "source_count", "INTEGER").await?;
+    ensure_table_column(pool, "conversation_turn_summaries", "subject_kind", "TEXT").await?;
+    ensure_table_column(pool, "conversation_turn_summaries", "subject_key", "TEXT").await?;
+    pool.execute("UPDATE conversation_turn_summaries SET subject_kind = COALESCE(subject_kind, (SELECT kind FROM conversation_thread_subjects WHERE thread_id = conversation_turn_summaries.thread_id)), subject_key = COALESCE(subject_key, (SELECT subject_key FROM conversation_thread_subjects WHERE thread_id = conversation_turn_summaries.thread_id));").await?;
+    pool.execute(
+        r#"DELETE FROM conversation_run_events
+        WHERE event_type = 'message.delta'
+          AND run_id IN (
+            SELECT id FROM conversation_runs
+            WHERE status IN ('completed', 'failed', 'canceled', 'interrupted')
+          );"#,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_table_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), sqlx::Error> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table});"))
+        .fetch_all(pool)
+        .await?;
+    if rows
+        .iter()
+        .any(|row| row.get::<String, _>("name") == column)
+    {
+        return Ok(());
+    }
+    pool.execute(format!("ALTER TABLE {table} ADD COLUMN {column} {definition};").as_str())
+        .await?;
     Ok(())
 }
 

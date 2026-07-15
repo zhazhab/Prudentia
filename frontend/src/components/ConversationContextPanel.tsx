@@ -1,6 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
-import { useI18n } from "../i18n";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { useI18n, type TranslationKey } from "../i18n";
 import type {
   CompanyView,
   MemoThreadMessage,
@@ -36,6 +38,10 @@ export function ConversationContextPanel({
   const latestContext = [...messages]
     .reverse()
     .find((message) => message.role === "assistant" && message.used_context.length)?.used_context;
+
+  useEffect(() => {
+    if (companyView) setTab("company");
+  }, [companyView?.symbol, companyView?.current_version]);
 
   return (
     <aside
@@ -112,11 +118,25 @@ export function ConversationContextPanel({
                 <strong>{companyView.company_name}</strong>
                 <span>{companyView.symbol} · v{companyView.current_version}</span>
               </header>
-              {companySections(companyView).map(([label, content]) =>
+              {companySections(companyView, t).map(([label, content]) =>
                 content ? (
                   <section key={label}>
                     <h3>{label}</h3>
-                    <p>{content}</p>
+                    <div className="message-markdown company-view-markdown">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        skipHtml
+                        components={{
+                          a: ({ href, children }) => (
+                            <a href={href} target="_blank" rel="noreferrer">
+                              {children}
+                            </a>
+                          )
+                        }}
+                      >
+                        {content}
+                      </ReactMarkdown>
+                    </div>
                   </section>
                 ) : null
               )}
@@ -143,16 +163,22 @@ export function ConversationContextPanel({
   );
 }
 
-function companySections(view: CompanyView): Array<[string, string]> {
+function companySections(
+  view: CompanyView,
+  t: (key: TranslationKey, values?: Record<string, string | number>) => string
+): Array<[string, string]> {
   return [
-    ["Business quality", view.content.business_quality],
-    ["Moat", view.content.moat],
-    ["Financials", view.content.financials],
-    ["Valuation", view.content.valuation_expectations],
-    ["Thesis", view.content.thesis],
-    ["Risks", view.content.risks],
-    ["Catalysts", view.content.catalysts],
-    ["Disconfirming evidence", view.content.disconfirming_evidence],
-    ["Open questions", view.content.open_questions.join("\n")]
+    [t("home.companyBusinessQuality"), view.content.business_quality],
+    [t("home.companyMoat"), view.content.moat],
+    [t("home.companyFinancials"), view.content.financials],
+    [t("home.companyValuation"), view.content.valuation_expectations],
+    [t("home.companyThesis"), view.content.thesis],
+    [t("home.companyRisks"), view.content.risks],
+    [t("home.companyCatalysts"), view.content.catalysts],
+    [t("home.companyDisconfirming"), view.content.disconfirming_evidence],
+    [
+      t("home.companyOpenQuestions"),
+      view.content.open_questions.map((question) => `- ${question}`).join("\n")
+    ]
   ];
 }

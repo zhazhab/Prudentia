@@ -3,28 +3,34 @@ import test from "node:test";
 import {
   chatHomeDefaultThreadId,
   constellationNodes,
+  mergeStoredActiveRun,
   mergeConversationMessages,
   memoChatElapsedSeconds,
+  placeConversationActions,
+  runActivityDescriptor,
+  shouldScrollConversationToBottom,
   shouldSubmitComposerMessage,
+  taskComplexityKey,
+  taskRouteReasonKey,
   threadRailItems,
   usedContextDescriptor
 } from "../src/pages/homeRules.ts";
 import type {
+  ConversationAction,
   ConversationRun,
   MemoThreadMessage,
   MemoThreadSummary,
   PortfolioPosition
 } from "../src/types/domain.ts";
 
-test("chat home restores last thread when it is available", () => {
+test("chat home opens the latest active thread", () => {
   const threads = [
     thread({ id: "recent", title: "Recent" }),
     thread({ id: "last", title: "Last" })
   ];
 
-  assert.equal(chatHomeDefaultThreadId(threads, "last"), "last");
-  assert.equal(chatHomeDefaultThreadId(threads, "missing"), "recent");
-  assert.equal(chatHomeDefaultThreadId([], "last"), null);
+  assert.equal(chatHomeDefaultThreadId(threads), "recent");
+  assert.equal(chatHomeDefaultThreadId([]), null);
 });
 
 test("thread rail keeps the latest twelve active threads", () => {
@@ -47,6 +53,119 @@ test("memo chat runtime reports non-negative elapsed seconds", () => {
   assert.equal(memoChatElapsedSeconds(1_000, 1_000), 0);
   assert.equal(memoChatElapsedSeconds(1_000, 47_499), 46);
   assert.equal(memoChatElapsedSeconds(2_000, 1_000), 0);
+});
+
+test("conversation opens at the latest message without hijacking deliberate history scroll", () => {
+  assert.equal(
+    shouldScrollConversationToBottom({
+      threadId: "thread-1",
+      pinnedThreadId: null,
+      messageCount: 25,
+      distanceFromBottom: 9_000
+    }),
+    true
+  );
+  assert.equal(
+    shouldScrollConversationToBottom({
+      threadId: "thread-1",
+      pinnedThreadId: "thread-1",
+      messageCount: 25,
+      distanceFromBottom: 9_000
+    }),
+    false
+  );
+  assert.equal(
+    shouldScrollConversationToBottom({
+      threadId: "thread-1",
+      pinnedThreadId: "thread-1",
+      messageCount: 26,
+      distanceFromBottom: 80
+    }),
+    true
+  );
+});
+
+test("run activity turns persisted backend stages into specific user-facing work", () => {
+  assert.deepEqual(
+    runActivityDescriptor({
+      phase: "researching",
+      providerStage: "research_fetching_public_sources",
+      sourceCount: 0
+    }),
+    { key: "home.activityFetchingPublicSources", params: {} }
+  );
+  assert.deepEqual(
+    runActivityDescriptor({
+      phase: "researching",
+      providerStage: "research_fetching_financial_history",
+      sourceCount: 0
+    }),
+    { key: "home.activityFetchingFinancialHistory", params: {} }
+  );
+  assert.deepEqual(
+    runActivityDescriptor({
+      phase: "generating",
+      providerStage: "request_started",
+      sourceCount: 0
+    }),
+    { key: "home.activityStartingProvider", params: {} }
+  );
+  assert.deepEqual(
+    runActivityDescriptor({
+      phase: "generating",
+      providerStage: "provider_reading_context",
+      sourceCount: 6
+    }),
+    { key: "home.activityReadingSources", params: { count: 6 } }
+  );
+  assert.deepEqual(
+    runActivityDescriptor({
+      phase: "generating",
+      providerStage: "provider_writing_response",
+      sourceCount: 6
+    }),
+    { key: "home.activityWritingResponse", params: {} }
+  );
+  assert.deepEqual(
+    runActivityDescriptor({
+      phase: "extracting_actions",
+      providerStage: "provider_completed",
+      sourceCount: 6
+    }),
+    { key: "home.phaseExtractingActions", params: {} }
+  );
+});
+
+test("persisted model routing metadata maps to explainable frontend copy", () => {
+  assert.equal(taskComplexityKey("simple"), "home.taskSimple");
+  assert.equal(taskComplexityKey("standard"), "home.taskStandard");
+  assert.equal(taskComplexityKey("deep"), "home.taskDeep");
+  assert.equal(taskComplexityKey("unknown"), null);
+  assert.equal(taskRouteReasonKey("company_research"), "home.routeReasonCompanyResearch");
+  assert.equal(
+    taskRouteReasonKey("subject_clarification"),
+    "home.routeReasonSubjectClarification"
+  );
+  assert.equal(taskRouteReasonKey("explicit_deep_analysis"), "home.routeReasonDeepAnalysis");
+  assert.equal(taskRouteReasonKey("unknown"), null);
+});
+
+test("a stale active-run fetch cannot overwrite newer routed event state", () => {
+  const stale = liveRun({
+    updated_at: "2026-01-01T00:00:01Z",
+    task_complexity: null,
+    model: null,
+    route_reason: null
+  });
+  const routed = liveRun({
+    updated_at: "2026-01-01T00:00:02Z",
+    task_complexity: "deep",
+    model: "gpt-5.6-sol",
+    route_reason: "explicit_deep_analysis",
+    providerStage: "provider_analyzing_evidence"
+  });
+
+  assert.deepEqual(mergeStoredActiveRun(stale, routed), routed);
 });
 
 test("IME confirmation Enter does not submit the conversation composer", () => {
@@ -110,6 +229,42 @@ test("streamed assistant content never overwrites the user message with the same
 
   assert.equal(merged[0].content, "你好");
   assert.equal(merged[1].content, "自然回复");
+});
+
+test("confirmation cards stay with their originating assistant message", () => {
+  const messages = [
+    message({ id: "assistant-old" }),
+    message({ id: "assistant-latest" })
+  ];
+  const rejected = action({
+    id: "rejected",
+    assistant_message_id: "assistant-old",
+    status: "rejected"
+  });
+  const proposed = action({
+    id: "proposed",
+    assistant_message_id: "assistant-latest",
+    status: "proposed"
+  });
+  const unloadedPending = action({
+    id: "unloaded",
+    assistant_message_id: "assistant-not-loaded",
+    status: "edited"
+  });
+  const unloadedTerminal = action({
+    id: "terminal-not-loaded",
+    assistant_message_id: "assistant-not-loaded",
+    status: "executed"
+  });
+
+  const placement = placeConversationActions(
+    messages,
+    [rejected, proposed, unloadedPending, unloadedTerminal]
+  );
+
+  assert.deepEqual(placement.byMessageId["assistant-old"], [rejected]);
+  assert.deepEqual(placement.byMessageId["assistant-latest"], [proposed]);
+  assert.deepEqual(placement.unplacedActive, [unloadedPending]);
 });
 
 test("used context metadata maps internal labels to localized descriptors", () => {
@@ -197,6 +352,44 @@ function message(overrides: Partial<MemoThreadMessage> = {}): MemoThreadMessage 
     used_context: [],
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
+    ...overrides
+  };
+}
+
+function liveRun(
+  overrides: Partial<ConversationRun & { streamContent: string; providerStage?: string }> = {}
+) {
+  return {
+    id: "run-1",
+    client_request_id: "request-1",
+    thread_id: "thread-1",
+    user_message_id: "user-1",
+    status: "running" as const,
+    phase: "generating" as const,
+    started_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:01Z",
+    streamContent: "",
+    ...overrides
+  };
+}
+
+function action(overrides: Partial<ConversationAction> = {}): ConversationAction {
+  return {
+    id: "action-1",
+    run_id: "run-1",
+    assistant_message_id: "assistant-1",
+    thread_id: "thread-1",
+    action_type: "company_view_patch",
+    title: "Update view",
+    rationale: "New evidence",
+    payload: {},
+    result: null,
+    target_version: 0,
+    status: "proposed",
+    error: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    executed_at: null,
     ...overrides
   };
 }

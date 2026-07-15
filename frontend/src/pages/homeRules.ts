@@ -1,8 +1,11 @@
 import type {
+  ConversationAction,
   ConversationRun,
+  ConversationRunPhase,
   MemoThreadMessage,
   MemoThreadSummary,
-  PortfolioPosition
+  PortfolioPosition,
+  TaskRouteReason
 } from "../types/domain";
 import type { TranslationKey } from "../i18n";
 
@@ -10,6 +13,24 @@ export interface LiveConversationRun extends ConversationRun {
   streamContent: string;
   messageId?: string;
   providerStage?: string;
+  sourceCount?: number;
+}
+
+export function mergeStoredActiveRun(
+  incoming: LiveConversationRun,
+  existing?: LiveConversationRun
+): LiveConversationRun {
+  if (!existing || existing.id !== incoming.id) return incoming;
+  if (Date.parse(existing.updated_at) > Date.parse(incoming.updated_at)) {
+    return { ...incoming, ...existing };
+  }
+  return {
+    ...incoming,
+    streamContent: existing.streamContent,
+    messageId: incoming.messageId ?? existing.messageId,
+    providerStage: incoming.providerStage ?? existing.providerStage,
+    sourceCount: incoming.sourceCount ?? existing.sourceCount
+  };
 }
 
 export interface ConstellationNode {
@@ -30,19 +51,48 @@ export interface UsedContextDescriptor {
   params: Record<string, string | number>;
 }
 
+export interface RunActivityDescriptor {
+  key: TranslationKey;
+  params: Record<string, string | number>;
+}
+
+export function taskComplexityKey(complexity?: string | null): TranslationKey | null {
+  if (complexity === "simple") return "home.taskSimple";
+  if (complexity === "standard") return "home.taskStandard";
+  if (complexity === "deep") return "home.taskDeep";
+  return null;
+}
+
+const routeReasonKeys: Record<TaskRouteReason, TranslationKey> = {
+  social_turn: "home.routeReasonSocial",
+  short_question: "home.routeReasonShort",
+  subject_clarification: "home.routeReasonSubjectClarification",
+  attachment_analysis: "home.routeReasonAttachment",
+  investment_system: "home.routeReasonInvestmentSystem",
+  multi_part_request: "home.routeReasonMultiPart",
+  long_request: "home.routeReasonLong",
+  explicit_deep_analysis: "home.routeReasonDeepAnalysis",
+  company_research: "home.routeReasonCompanyResearch",
+  standard_conversation: "home.routeReasonStandard"
+};
+
+export function parseTaskRouteReason(value: unknown): TaskRouteReason | undefined {
+  return typeof value === "string" && value in routeReasonKeys
+    ? value as TaskRouteReason
+    : undefined;
+}
+
+export function taskRouteReasonKey(reason?: string | null): TranslationKey | null {
+  const parsed = parseTaskRouteReason(reason);
+  return parsed ? routeReasonKeys[parsed] : null;
+}
+
 const constellationColors = ["#2f6f73", "#8b5d33", "#7a4a63", "#4f6f37", "#53617a", "#94624f"];
 
-export function chatHomeDefaultThreadId(
-  threads: MemoThreadSummary[],
-  lastThreadId?: string | null
-) {
+export function chatHomeDefaultThreadId(threads: MemoThreadSummary[]) {
   const activeThreads = threadRailItems(threads, 50);
   if (!activeThreads.length) {
     return null;
-  }
-
-  if (lastThreadId && activeThreads.some((thread) => thread.id === lastThreadId)) {
-    return lastThreadId;
   }
 
   return activeThreads[0].id;
@@ -54,6 +104,88 @@ export function threadRailItems<T extends MemoThreadSummary>(threads: T[], limit
 
 export function memoChatElapsedSeconds(startedAtMs: number, nowMs: number) {
   return Math.max(0, Math.floor((nowMs - startedAtMs) / 1_000));
+}
+
+export function shouldScrollConversationToBottom({
+  threadId,
+  pinnedThreadId,
+  messageCount,
+  distanceFromBottom
+}: {
+  threadId: string | null;
+  pinnedThreadId: string | null;
+  messageCount: number;
+  distanceFromBottom: number;
+}) {
+  if (!threadId || messageCount === 0) return false;
+  return threadId !== pinnedThreadId || distanceFromBottom < 140;
+}
+
+export function runActivityDescriptor(run: {
+  phase: ConversationRunPhase;
+  providerStage?: string;
+  sourceCount?: number;
+}): RunActivityDescriptor {
+  if (
+    run.phase === "generating" &&
+    run.providerStage === "provider_reading_context" &&
+    (run.sourceCount ?? 0) > 0
+  ) {
+    return {
+      key: "home.activityReadingSources",
+      params: { count: run.sourceCount ?? 0 }
+    };
+  }
+
+  const researchActivityKeys: Record<string, TranslationKey> = {
+    research_checking_cache: "home.activityCheckingResearchCache",
+    research_cache_hit: "home.activityResearchCacheHit",
+    research_fetching_public_sources: "home.activityFetchingPublicSources",
+    research_fetching_financial_history: "home.activityFetchingFinancialHistory",
+    research_verifying_sources: "home.activityVerifyingSources",
+    research_searching_official: "home.activitySearchingOfficial",
+    research_searching_independent: "home.activitySearchingIndependent",
+    research_searching_community: "home.activitySearchingCommunity"
+  };
+  const providerActivityKeys: Record<string, TranslationKey> = {
+    provider_preparing: "home.activityPreparingContext",
+    process_starting: "home.activityStartingProvider",
+    provider_ready: "home.activityProviderReady",
+    provider_reading_context: "home.activityReadingContext",
+    provider_analyzing_evidence: "home.activityAnalyzingEvidence",
+    provider_using_tool: "home.activityAdditionalStep",
+    provider_writing_response: "home.activityWritingResponse",
+    provider_completed: "home.activityResponseReady",
+    provider_failed: "home.runFailed",
+    request_started: "home.activityStartingProvider",
+    generating: "home.activityAnalyzingEvidence",
+    provider_fallback: "home.activityProviderFallback"
+  };
+  const activityKey = run.providerStage
+    ? run.phase === "researching"
+      ? researchActivityKeys[run.providerStage]
+      : run.phase === "generating"
+        ? providerActivityKeys[run.providerStage]
+        : undefined
+    : undefined;
+  if (activityKey) {
+    return { key: activityKey, params: {} };
+  }
+
+  const phaseKeys: Record<ConversationRunPhase, TranslationKey> = {
+    queued: "home.phaseQueued",
+    resolving_subject: "home.phaseResolvingSubject",
+    loading_context: "home.phaseLoadingContext",
+    researching: "home.phaseResearching",
+    generating: "home.phaseGenerating",
+    extracting_actions: "home.phaseExtractingActions",
+    persisting: "home.phasePersisting",
+    completed: "home.activityResponseReady",
+    failed: "home.runFailed",
+    canceled: "home.runCanceled",
+    interrupted: "home.runInterrupted"
+  };
+  return { key: phaseKeys[run.phase] ?? "home.backendRunning", params: {} };
 }
 
 export function shouldSubmitComposerMessage(event: {
@@ -165,6 +297,26 @@ export function mergeConversationMessages(
     });
   }
   return messages;
+}
+
+export function placeConversationActions(
+  messages: MemoThreadMessage[],
+  actions: ConversationAction[]
+) {
+  const visibleMessageIds = new Set(messages.map((message) => message.id));
+  const byMessageId: Record<string, ConversationAction[]> = {};
+  const unplacedActive: ConversationAction[] = [];
+
+  actions.forEach((action) => {
+    const messageId = action.assistant_message_id;
+    if (messageId && visibleMessageIds.has(messageId)) {
+      byMessageId[messageId] = [...(byMessageId[messageId] ?? []), action];
+    } else if (!["executed", "rejected"].includes(action.status)) {
+      unplacedActive.push(action);
+    }
+  });
+
+  return { byMessageId, unplacedActive };
 }
 
 export function constellationNodes(positions: PortfolioPosition[]) {

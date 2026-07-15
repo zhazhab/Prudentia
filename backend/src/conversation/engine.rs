@@ -4,16 +4,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use serde_json::{json, Value};
 use sqlx::SqlitePool;
-use tokio::{
-    sync::{broadcast, mpsc},
-    task::JoinHandle,
-};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
-    ai::{runtime::AiRuntime, AiProviderEvent, ConversationActionDraft, ConversationProjection},
+    ai::runtime::AiRuntime,
     error::{AppError, AppResult},
     locale::Locale,
     market_data::MarketDataProvider,
@@ -21,8 +17,7 @@ use crate::{
 
 use super::{
     actions,
-    context::{assemble_context, resolve_subject, ConversationResearchContext},
-    research::{plan_research, search_with_cache, WebResearchProvider},
+    research::WebResearchProvider,
     storage,
     types::{
         ConfirmActionRequest, ConversationAction, ConversationRun, ConversationThreadDetail,
@@ -31,13 +26,23 @@ use super::{
     },
 };
 
+mod events;
+mod runtime;
+mod subject_clarification;
+mod task;
+mod turn_context;
+mod turn_support;
+
+use events::ConversationEvent;
+use task::TurnTask;
+
 pub struct ConversationEngine {
     pool: SqlitePool,
     ai: Arc<AiRuntime>,
     market_data: Arc<dyn MarketDataProvider>,
     research: Arc<dyn WebResearchProvider>,
     workspace_dir: PathBuf,
-    tasks: Mutex<HashMap<String, JoinHandle<()>>>,
+    tasks: Mutex<HashMap<String, TurnTask>>,
     events: broadcast::Sender<RunEvent>,
 }
 
@@ -63,8 +68,7 @@ impl ConversationEngine {
 
     pub async fn recover_interrupted(&self) -> AppResult<()> {
         for run in storage::active_runs(&self.pool).await? {
-            storage::mark_assistant_terminal(&self.pool, &run.id, "failed", None).await?;
-            storage::finish_run(
+            let transitioned = storage::finish_run(
                 &self.pool,
                 &run.id,
                 "interrupted",
@@ -73,13 +77,18 @@ impl ConversationEngine {
                 Some("The backend restarted before this response completed."),
             )
             .await?;
-            self.emit(
-                &run.id,
-                &run.thread_id,
-                "run.interrupted",
-                json!({ "code": "backend_restarted", "retryable": true }),
-            )
-            .await?;
+            if transitioned {
+                storage::mark_assistant_terminal(&self.pool, &run.id, "failed", None).await?;
+                self.emit(
+                    &run.id,
+                    &run.thread_id,
+                    ConversationEvent::RunInterrupted {
+                        code: "backend_restarted".to_string(),
+                        retryable: true,
+                    },
+                )
+                .await?;
+            }
         }
         Ok(())
     }
@@ -98,8 +107,10 @@ impl ConversationEngine {
         self.emit(
             &run.id,
             &run.thread_id,
-            "run.accepted",
-            json!({ "run": run, "thread": thread }),
+            ConversationEvent::RunAccepted {
+                run: run.clone(),
+                thread: thread.clone(),
+            },
         )
         .await?;
         if run.status == "queued" {
@@ -113,23 +124,25 @@ impl ConversationEngine {
         if !matches!(run.status.as_str(), "queued" | "running") {
             return Ok(run);
         }
-        if let Some(handle) = self
+        let task = self
             .tasks
             .lock()
             .expect("conversation task lock poisoned")
-            .remove(run_id)
-        {
-            handle.abort();
+            .remove(run_id);
+        if let Some(task) = task {
+            task.cancel_and_wait().await;
         }
-        storage::mark_assistant_terminal(&self.pool, run_id, "canceled", None).await?;
-        storage::finish_run(&self.pool, run_id, "canceled", "canceled", None, None).await?;
-        self.emit(
-            run_id,
-            &run.thread_id,
-            "run.canceled",
-            json!({ "retryable": true }),
-        )
-        .await?;
+        let transitioned =
+            storage::finish_run(&self.pool, run_id, "canceled", "canceled", None, None).await?;
+        if transitioned {
+            storage::mark_assistant_terminal(&self.pool, run_id, "canceled", None).await?;
+            self.emit(
+                run_id,
+                &run.thread_id,
+                ConversationEvent::RunCanceled { retryable: true },
+            )
+            .await?;
+        }
         storage::run_by_id(&self.pool, run_id).await
     }
 
@@ -165,14 +178,16 @@ impl ConversationEngine {
         self.emit(
             &run.id,
             &thread_id,
-            "run.accepted",
-            json!({ "run": run, "thread": thread, "retry_of_run_id": run_id }),
+            ConversationEvent::RunRetried {
+                run: run.clone(),
+                thread: thread.clone(),
+                retry_of_run_id: run_id.to_string(),
+            },
         )
         .await?;
         self.spawn(run.id.clone(), locale);
         Ok(StartRunResponse { run, thread })
     }
-
     pub async fn list_threads(&self) -> AppResult<Vec<ConversationThreadSummary>> {
         storage::list_threads(&self.pool).await
     }
@@ -220,8 +235,7 @@ impl ConversationEngine {
         self.emit(
             &updated.run_id,
             &updated.thread_id,
-            "action.updated",
-            serde_json::to_value(&updated)?,
+            ConversationEvent::ActionUpdated(updated.clone()),
         )
         .await?;
         Ok(updated)
@@ -243,8 +257,7 @@ impl ConversationEngine {
         self.emit(
             &action.run_id,
             &action.thread_id,
-            "action.updated",
-            serde_json::to_value(&action)?,
+            ConversationEvent::ActionUpdated(action.clone()),
         )
         .await?;
         Ok(action)
@@ -255,8 +268,7 @@ impl ConversationEngine {
         self.emit(
             &action.run_id,
             &action.thread_id,
-            "action.updated",
-            serde_json::to_value(&action)?,
+            ConversationEvent::ActionUpdated(action.clone()),
         )
         .await?;
         Ok(action)
@@ -265,376 +277,16 @@ impl ConversationEngine {
     pub async fn replay_events(&self, after: i64) -> AppResult<Vec<RunEvent>> {
         storage::replay_events(&self.pool, after).await
     }
-
     pub fn subscribe(&self) -> broadcast::Receiver<RunEvent> {
         self.events.subscribe()
     }
-
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
-
     pub fn workspace_dir(&self) -> &PathBuf {
         &self.workspace_dir
-    }
-
-    fn spawn(self: &Arc<Self>, run_id: String, locale: Locale) {
-        let engine = self.clone();
-        let task_run_id = run_id.clone();
-        let handle = tokio::spawn(async move {
-            if let Err(error) = engine.run_turn(&task_run_id, locale).await {
-                let _ = engine
-                    .fail_run(&task_run_id, "conversation_failed", &error.to_string())
-                    .await;
-            }
-            engine
-                .tasks
-                .lock()
-                .expect("conversation task lock poisoned")
-                .remove(&task_run_id);
-        });
-        self.tasks
-            .lock()
-            .expect("conversation task lock poisoned")
-            .insert(run_id, handle);
-    }
-
-    async fn run_turn(&self, run_id: &str, locale: Locale) -> AppResult<()> {
-        let run = storage::run_by_id(&self.pool, run_id).await?;
-        let user_message = sqlx::query_scalar::<_, String>(
-            "SELECT content FROM memo_thread_messages WHERE id = ?",
-        )
-        .bind(&run.user_message_id)
-        .fetch_one(&self.pool)
-        .await?;
-
-        self.phase(&run, "resolving_subject", None, None).await?;
-        let subject = resolve_subject(&self.pool, &run.thread_id, &user_message).await?;
-
-        let mut sources = Vec::new();
-        let mut source_values = Vec::new();
-        let mut research_warning = None;
-        if let Some(research_request) = plan_research(&user_message, &subject) {
-            self.phase(&run, "researching", None, None).await?;
-            match search_with_cache(&self.pool, self.research.clone(), &research_request).await {
-                Ok(outcome) => {
-                    research_warning = outcome.warning;
-                    for source in outcome.sources {
-                        let value = storage::insert_source(&self.pool, run_id, &source).await?;
-                        self.emit(run_id, &run.thread_id, "source.added", value.clone())
-                            .await?;
-                        source_values.push(value);
-                        sources.push(source);
-                    }
-                }
-                Err(error) => research_warning = Some(error.to_string()),
-            }
-        }
-
-        self.phase(&run, "loading_context", None, None).await?;
-        let context = assemble_context(
-            &self.pool,
-            &self.workspace_dir,
-            run_id,
-            &run.thread_id,
-            &user_message,
-            &subject,
-            ConversationResearchContext {
-                sources,
-                warning: research_warning,
-            },
-        )
-        .await?;
-
-        self.phase(&run, "generating", None, None).await?;
-        let (provider_tx, mut provider_rx) = mpsc::unbounded_channel();
-        let response = self
-            .ai
-            .respond_to_conversation(&context, locale, provider_tx);
-        tokio::pin!(response);
-        let mut saw_delta = false;
-        let assistant_response = loop {
-            tokio::select! {
-                event = provider_rx.recv() => {
-                    let Some(event) = event else {
-                        break response
-                            .await
-                            .map_err(|error| AppError::internal(error.to_string()))?;
-                    };
-                    saw_delta |= self.handle_provider_event(&run, event).await?;
-                }
-                result = &mut response => {
-                    break result.map_err(|error| AppError::internal(error.to_string()))?;
-                },
-            }
-        };
-        while let Ok(event) = provider_rx.try_recv() {
-            saw_delta |= self.handle_provider_event(&run, event).await?;
-        }
-
-        let source_json = source_values;
-        let used_context = context.used_context.clone();
-        let message_id = storage::complete_assistant_message(
-            &self.pool,
-            run_id,
-            &assistant_response,
-            &source_json,
-            &used_context,
-        )
-        .await?;
-        if !saw_delta {
-            self.emit(
-                run_id,
-                &run.thread_id,
-                "message.completed",
-                json!({ "message_id": message_id, "content": assistant_response }),
-            )
-            .await?;
-        } else {
-            self.emit(
-                run_id,
-                &run.thread_id,
-                "message.completed",
-                json!({ "message_id": message_id }),
-            )
-            .await?;
-        }
-
-        let projection = if should_skip_action_projection(
-            &user_message,
-            !context.attachments.is_empty(),
-            !context.research_sources.is_empty(),
-        ) {
-            ConversationProjection {
-                summary: casual_turn_summary(locale).to_string(),
-                actions: Vec::new(),
-            }
-        } else {
-            self.phase(&run, "extracting_actions", None, None).await?;
-            match self
-                .ai
-                .project_conversation(&context, &assistant_response, locale)
-                .await
-            {
-                Ok(projection) => projection,
-                Err(error) => {
-                    self.emit(
-                        run_id,
-                        &run.thread_id,
-                        "run.warning",
-                        json!({ "code": "action_projection_failed", "message": error.to_string() }),
-                    )
-                    .await?;
-                    ConversationProjection {
-                        summary: fallback_summary(&user_message),
-                        actions: Vec::new(),
-                    }
-                }
-            }
-        };
-
-        self.phase(&run, "persisting", None, None).await?;
-        storage::insert_turn_summary(&self.pool, run_id, &run.thread_id, &projection.summary)
-            .await?;
-        for mut draft in projection.actions {
-            enrich_draft(&mut draft, &subject);
-            match actions::prepare_action(&self.pool, self.market_data.clone(), draft).await {
-                Ok((draft, target_version)) => {
-                    let action = storage::insert_action(
-                        &self.pool,
-                        run_id,
-                        &run.thread_id,
-                        draft,
-                        target_version,
-                    )
-                    .await?;
-                    self.emit(
-                        run_id,
-                        &run.thread_id,
-                        "action.proposed",
-                        serde_json::to_value(&action)?,
-                    )
-                    .await?;
-                }
-                Err(error) => {
-                    self.emit(
-                        run_id,
-                        &run.thread_id,
-                        "run.warning",
-                        json!({ "code": "invalid_action_proposal", "message": error.to_string() }),
-                    )
-                    .await?;
-                }
-            }
-        }
-        storage::finish_run(&self.pool, run_id, "completed", "completed", None, None).await?;
-        self.emit(
-            run_id,
-            &run.thread_id,
-            "run.completed",
-            json!({ "message_id": message_id }),
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn handle_provider_event(
-        &self,
-        run: &ConversationRun,
-        event: AiProviderEvent,
-    ) -> AppResult<bool> {
-        match event {
-            AiProviderEvent::Stage { provider, stage } => {
-                storage::set_run_phase(&self.pool, &run.id, "generating", Some(&provider)).await?;
-                self.emit(
-                    &run.id,
-                    &run.thread_id,
-                    "run.phase",
-                    json!({ "phase": "generating", "provider": provider, "provider_stage": stage }),
-                )
-                .await?;
-                Ok(false)
-            }
-            AiProviderEvent::TextDelta(content) => {
-                let message_id =
-                    storage::append_assistant_delta(&self.pool, &run.id, &content).await?;
-                self.emit(
-                    &run.id,
-                    &run.thread_id,
-                    "message.delta",
-                    json!({ "message_id": message_id, "content": content }),
-                )
-                .await?;
-                Ok(true)
-            }
-        }
-    }
-
-    async fn phase(
-        &self,
-        run: &ConversationRun,
-        phase: &str,
-        provider: Option<&str>,
-        detail: Option<Value>,
-    ) -> AppResult<()> {
-        storage::set_run_phase(&self.pool, &run.id, phase, provider).await?;
-        self.emit(
-            &run.id,
-            &run.thread_id,
-            "run.phase",
-            json!({ "phase": phase, "provider": provider, "detail": detail }),
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn fail_run(&self, run_id: &str, code: &str, message: &str) -> AppResult<()> {
-        let run = storage::run_by_id(&self.pool, run_id).await?;
-        if !matches!(run.status.as_str(), "queued" | "running") {
-            return Ok(());
-        }
-        storage::mark_assistant_terminal(&self.pool, run_id, "failed", None).await?;
-        storage::finish_run(
-            &self.pool,
-            run_id,
-            "failed",
-            "failed",
-            Some(code),
-            Some(message),
-        )
-        .await?;
-        self.emit(
-            run_id,
-            &run.thread_id,
-            "run.failed",
-            json!({ "code": code, "message": message, "retryable": true }),
-        )
-        .await?;
-        Ok(())
-    }
-
-    async fn emit(
-        &self,
-        run_id: &str,
-        thread_id: &str,
-        event_type: &str,
-        payload: Value,
-    ) -> AppResult<RunEvent> {
-        let event =
-            storage::append_event(&self.pool, run_id, thread_id, event_type, payload).await?;
-        let _ = self.events.send(event.clone());
-        Ok(event)
-    }
-}
-
-fn enrich_draft(draft: &mut ConversationActionDraft, subject: &ThreadSubject) {
-    let Some(object) = draft.payload.as_object_mut() else {
-        return;
-    };
-    let should_enrich_symbol = matches!(
-        draft.action_type.as_str(),
-        "company_view_patch" | "trade_record"
-    ) && !object.contains_key("symbol");
-    if let (true, Some(symbol)) = (should_enrich_symbol, subject.subject_key.as_ref()) {
-        object.insert("symbol".to_string(), Value::String(symbol.clone()));
-    }
-    if draft.action_type == "company_view_patch" && !object.contains_key("company_name") {
-        if let Some(label) = &subject.label {
-            object.insert("company_name".to_string(), Value::String(label.clone()));
-        }
-    }
-}
-
-fn fallback_summary(message: &str) -> String {
-    let mut summary = message.trim().chars().take(240).collect::<String>();
-    if message.chars().count() > 240 {
-        summary.push_str("...");
-    }
-    summary
-}
-
-fn should_skip_action_projection(
-    message: &str,
-    has_attachments: bool,
-    has_research_sources: bool,
-) -> bool {
-    if has_attachments || has_research_sources {
-        return false;
-    }
-
-    super::is_simple_social_turn(message)
-}
-
-fn casual_turn_summary(locale: Locale) -> &'static str {
-    if locale.is_zh() {
-        "用户进行了寒暄或能力询问，未产生可确认变更。"
-    } else {
-        "The user greeted the assistant or asked about its capabilities; no confirmable changes were proposed."
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::should_skip_action_projection;
-
-    #[test]
-    fn casual_turns_skip_action_projection() {
-        assert!(should_skip_action_projection("你好！", false, false));
-        assert!(should_skip_action_projection(
-            "What can you do?",
-            false,
-            false
-        ));
-    }
-
-    #[test]
-    fn material_or_evidence_backed_turns_keep_action_projection() {
-        assert!(!should_skip_action_projection(
-            "你好，帮我记录买入 100 股。",
-            false,
-            false
-        ));
-        assert!(!should_skip_action_projection("你好", true, false));
-        assert!(!should_skip_action_projection("你好", false, true));
-    }
-}
+mod tests;

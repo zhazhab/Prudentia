@@ -35,6 +35,47 @@ pub enum AiProviderKind {
     Cli,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskComplexity {
+    Simple,
+    Standard,
+    Deep,
+}
+
+impl TaskComplexity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Simple => "simple",
+            Self::Standard => "standard",
+            Self::Deep => "deep",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTierSettings {
+    pub simple: String,
+    pub standard: String,
+    pub deep: String,
+}
+
+impl ModelTierSettings {
+    fn model_for(&self, complexity: TaskComplexity) -> &str {
+        match complexity {
+            TaskComplexity::Simple => &self.simple,
+            TaskComplexity::Standard => &self.standard,
+            TaskComplexity::Deep => &self.deep,
+        }
+    }
+
+    fn set_all(&mut self, model: String) {
+        self.simple = model.clone();
+        self.standard = model.clone();
+        self.deep = model;
+    }
+}
+
 impl AiProviderKind {
     pub fn parse(value: &str) -> Result<Self, AiError> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -63,7 +104,9 @@ pub struct AiSettings {
     pub openai_api_key: Option<String>,
     pub openai_base_url: String,
     pub openai_model: String,
+    pub openai_models: ModelTierSettings,
     pub cli: CliSettings,
+    pub cli_models: ModelTierSettings,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,10 +115,16 @@ pub struct AiSettingsResponse {
     pub provider_chain: Vec<String>,
     pub openai_base_url: String,
     pub openai_model: String,
+    pub openai_model_simple: String,
+    pub openai_model_standard: String,
+    pub openai_model_deep: String,
     pub has_openai_api_key: bool,
     pub cli_provider: String,
     pub cli_path: String,
     pub cli_model: Option<String>,
+    pub cli_model_simple: String,
+    pub cli_model_standard: String,
+    pub cli_model_deep: String,
     pub cli_profile: Option<String>,
     pub cli_login_command: Option<String>,
 }
@@ -86,9 +135,15 @@ pub struct UpdateAiSettingsRequest {
     pub openai_api_key: Option<String>,
     pub openai_base_url: Option<String>,
     pub openai_model: Option<String>,
+    pub openai_model_simple: Option<String>,
+    pub openai_model_standard: Option<String>,
+    pub openai_model_deep: Option<String>,
     pub cli_provider: Option<String>,
     pub cli_path: Option<String>,
     pub cli_model: Option<String>,
+    pub cli_model_simple: Option<String>,
+    pub cli_model_standard: Option<String>,
+    pub cli_model_deep: Option<String>,
     pub cli_profile: Option<String>,
     pub persist_to_env: Option<bool>,
 }
@@ -141,7 +196,18 @@ impl AiRuntime {
             settings.openai_base_url = openai_base_url;
         }
         if let Some(openai_model) = request.openai_model.and_then(clean_option) {
-            settings.openai_model = openai_model;
+            settings.openai_model = openai_model.clone();
+            settings.openai_models.set_all(openai_model);
+        }
+        if let Some(model) = request.openai_model_simple.and_then(clean_option) {
+            settings.openai_models.simple = model;
+        }
+        if let Some(model) = request.openai_model_standard.and_then(clean_option) {
+            settings.openai_model = model.clone();
+            settings.openai_models.standard = model;
+        }
+        if let Some(model) = request.openai_model_deep.and_then(clean_option) {
+            settings.openai_models.deep = model;
         }
         if let Some(cli_provider) = request.cli_provider.and_then(clean_option) {
             settings.cli.provider = CliProviderKind::parse(&cli_provider)?;
@@ -153,6 +219,19 @@ impl AiRuntime {
 
         if let Some(cli_model) = request.cli_model {
             settings.cli.model = clean_option(cli_model);
+            if let Some(model) = settings.cli.model.clone() {
+                settings.cli_models.set_all(model);
+            }
+        }
+        if let Some(model) = request.cli_model_simple.and_then(clean_option) {
+            settings.cli_models.simple = model;
+        }
+        if let Some(model) = request.cli_model_standard.and_then(clean_option) {
+            settings.cli.model = Some(model.clone());
+            settings.cli_models.standard = model;
+        }
+        if let Some(model) = request.cli_model_deep.and_then(clean_option) {
+            settings.cli_models.deep = model;
         }
 
         if let Some(cli_profile) = request.cli_profile {
@@ -185,6 +264,8 @@ impl AiRuntime {
         &self,
         context: &ConversationContext,
         locale: Locale,
+        complexity: TaskComplexity,
+        route_reason: &str,
         events: mpsc::UnboundedSender<AiProviderEvent>,
     ) -> Result<String, AiError> {
         let settings = self
@@ -194,7 +275,14 @@ impl AiRuntime {
             .clone();
         let mut last_error = None;
         for (index, kind) in settings.provider_chain.iter().copied().enumerate() {
-            let provider = provider_for_kind(&settings, kind);
+            let (routed_settings, model) = settings.routed_for(kind, complexity);
+            let _ = events.send(AiProviderEvent::RouteSelected {
+                provider: kind.as_str().to_string(),
+                model,
+                complexity: complexity.as_str().to_string(),
+                reason: route_reason.to_string(),
+            });
+            let provider = provider_for_kind(&routed_settings, kind);
             let (provider_tx, mut provider_rx) = mpsc::unbounded_channel();
             let response = provider.respond_to_conversation(context, locale, provider_tx);
             tokio::pin!(response);
@@ -240,6 +328,7 @@ impl AiRuntime {
         context: &ConversationContext,
         assistant_response: &str,
         locale: Locale,
+        complexity: TaskComplexity,
     ) -> Result<ConversationProjection, AiError> {
         let settings = self
             .settings
@@ -248,7 +337,8 @@ impl AiRuntime {
             .clone();
         let mut errors = Vec::new();
         for kind in &settings.provider_chain {
-            match provider_for_kind(&settings, *kind)
+            let (routed_settings, _) = settings.routed_for(*kind, complexity);
+            match provider_for_kind(&routed_settings, *kind)
                 .project_conversation(context, assistant_response, locale)
                 .await
             {
@@ -362,6 +452,11 @@ impl AiSettings {
             openai_api_key: config.openai_api_key.clone(),
             openai_base_url: config.openai_base_url.clone(),
             openai_model: config.openai_model.clone(),
+            openai_models: ModelTierSettings {
+                simple: config.openai_model_simple.clone(),
+                standard: config.openai_model_standard.clone(),
+                deep: config.openai_model_deep.clone(),
+            },
             cli: CliSettings {
                 provider: CliProviderKind::parse(&config.ai_cli_provider)
                     .unwrap_or(CliProviderKind::Codex),
@@ -369,7 +464,30 @@ impl AiSettings {
                 model: config.ai_cli_model.clone(),
                 profile: config.ai_cli_profile.clone(),
             },
+            cli_models: ModelTierSettings {
+                simple: config.ai_cli_model_simple.clone(),
+                standard: config.ai_cli_model_standard.clone(),
+                deep: config.ai_cli_model_deep.clone(),
+            },
         }
+    }
+
+    fn routed_for(&self, provider: AiProviderKind, complexity: TaskComplexity) -> (Self, String) {
+        let mut settings = self.clone();
+        let model = match provider {
+            AiProviderKind::Cli => {
+                let model = self.cli_models.model_for(complexity).to_string();
+                settings.cli.model = Some(model.clone());
+                model
+            }
+            AiProviderKind::OpenAi => {
+                let model = self.openai_models.model_for(complexity).to_string();
+                settings.openai_model = model.clone();
+                model
+            }
+            AiProviderKind::Mock => "mock".to_string(),
+        };
+        (settings, model)
     }
 
     pub fn to_response(&self) -> AiSettingsResponse {
@@ -382,10 +500,16 @@ impl AiSettings {
                 .collect(),
             openai_base_url: self.openai_base_url.clone(),
             openai_model: self.openai_model.clone(),
+            openai_model_simple: self.openai_models.simple.clone(),
+            openai_model_standard: self.openai_models.standard.clone(),
+            openai_model_deep: self.openai_models.deep.clone(),
             has_openai_api_key: self.openai_api_key.is_some(),
             cli_provider: self.cli.provider.as_str().to_string(),
             cli_path: self.cli.path.clone(),
             cli_model: self.cli.model.clone(),
+            cli_model_simple: self.cli_models.simple.clone(),
+            cli_model_standard: self.cli_models.standard.clone(),
+            cli_model_deep: self.cli_models.deep.clone(),
             cli_profile: self.cli.profile.clone(),
             cli_login_command: self.cli.provider.login_command(&self.cli),
         }
@@ -426,6 +550,21 @@ fn write_env_file(path: &Path, settings: &AiSettings) -> Result<(), AiError> {
     set_env_line(&mut lines, "OPENAI_MODEL", &settings.openai_model);
     set_env_line(
         &mut lines,
+        "OPENAI_MODEL_SIMPLE",
+        &settings.openai_models.simple,
+    );
+    set_env_line(
+        &mut lines,
+        "OPENAI_MODEL_STANDARD",
+        &settings.openai_models.standard,
+    );
+    set_env_line(
+        &mut lines,
+        "OPENAI_MODEL_DEEP",
+        &settings.openai_models.deep,
+    );
+    set_env_line(
+        &mut lines,
         "AI_CLI_PROVIDER",
         settings.cli.provider.as_str(),
     );
@@ -435,6 +574,17 @@ fn write_env_file(path: &Path, settings: &AiSettings) -> Result<(), AiError> {
         "AI_CLI_MODEL",
         settings.cli.model.as_deref().unwrap_or_default(),
     );
+    set_env_line(
+        &mut lines,
+        "AI_CLI_MODEL_SIMPLE",
+        &settings.cli_models.simple,
+    );
+    set_env_line(
+        &mut lines,
+        "AI_CLI_MODEL_STANDARD",
+        &settings.cli_models.standard,
+    );
+    set_env_line(&mut lines, "AI_CLI_MODEL_DEEP", &settings.cli_models.deep);
     set_env_line(
         &mut lines,
         "AI_CLI_PROFILE",
@@ -494,4 +644,57 @@ fn parse_provider_chain(value: &str) -> Result<Vec<AiProviderKind>, AiError> {
         ));
     }
     Ok(providers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversation_routing_selects_the_configured_model_for_each_tier() {
+        let settings = test_settings();
+
+        let (simple, simple_model) =
+            settings.routed_for(AiProviderKind::Cli, TaskComplexity::Simple);
+        let (standard, standard_model) =
+            settings.routed_for(AiProviderKind::Cli, TaskComplexity::Standard);
+        let (deep, deep_model) = settings.routed_for(AiProviderKind::Cli, TaskComplexity::Deep);
+
+        assert_eq!(simple_model, "gpt-5.6-luna");
+        assert_eq!(simple.cli.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(standard_model, "gpt-5.6-terra");
+        assert_eq!(standard.cli.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(deep_model, "gpt-5.6-sol");
+        assert_eq!(deep.cli.model.as_deref(), Some("gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn openai_compatible_routing_uses_endpoint_specific_tier_models() {
+        let settings = test_settings();
+        let (deep, model) = settings.routed_for(AiProviderKind::OpenAi, TaskComplexity::Deep);
+
+        assert_eq!(model, "hosted-deep");
+        assert_eq!(deep.openai_model, "hosted-deep");
+    }
+
+    fn test_settings() -> AiSettings {
+        AiSettings {
+            provider: AiProviderKind::Cli,
+            provider_chain: vec![AiProviderKind::Cli],
+            openai_api_key: None,
+            openai_base_url: "https://example.com/v1".to_string(),
+            openai_model: "hosted-standard".to_string(),
+            openai_models: ModelTierSettings {
+                simple: "hosted-simple".to_string(),
+                standard: "hosted-standard".to_string(),
+                deep: "hosted-deep".to_string(),
+            },
+            cli: CliSettings::default(),
+            cli_models: ModelTierSettings {
+                simple: "gpt-5.6-luna".to_string(),
+                standard: "gpt-5.6-terra".to_string(),
+                deep: "gpt-5.6-sol".to_string(),
+            },
+        }
+    }
 }

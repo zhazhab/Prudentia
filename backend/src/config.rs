@@ -13,9 +13,15 @@ pub struct AppConfig {
     pub openai_api_key: Option<String>,
     pub openai_base_url: String,
     pub openai_model: String,
+    pub openai_model_simple: String,
+    pub openai_model_standard: String,
+    pub openai_model_deep: String,
     pub ai_cli_provider: String,
     pub ai_cli_path: String,
     pub ai_cli_model: Option<String>,
+    pub ai_cli_model_simple: String,
+    pub ai_cli_model_standard: String,
+    pub ai_cli_model_deep: String,
     pub ai_cli_profile: Option<String>,
     pub market_data_provider: String,
     pub alpha_vantage_api_key: Option<String>,
@@ -101,6 +107,9 @@ impl AppConfig {
             openai_base_url: env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
             openai_model: env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".to_string()),
+            openai_model_simple: routed_openai_model("OPENAI_MODEL_SIMPLE"),
+            openai_model_standard: routed_openai_model("OPENAI_MODEL_STANDARD"),
+            openai_model_deep: routed_openai_model("OPENAI_MODEL_DEEP"),
             ai_cli_provider: env::var("AI_CLI_PROVIDER").unwrap_or_else(|_| "codex".to_string()),
             ai_cli_path: env::var("AI_CLI_PATH")
                 .or_else(|_| env::var("CODEX_CLI_PATH"))
@@ -109,6 +118,9 @@ impl AppConfig {
                 .or_else(|_| env::var("CODEX_MODEL"))
                 .ok()
                 .filter(|value| !value.is_empty()),
+            ai_cli_model_simple: routed_cli_model("AI_CLI_MODEL_SIMPLE", "gpt-5.6-luna"),
+            ai_cli_model_standard: routed_cli_model("AI_CLI_MODEL_STANDARD", "gpt-5.6-terra"),
+            ai_cli_model_deep: routed_cli_model("AI_CLI_MODEL_DEEP", "gpt-5.6-sol"),
             ai_cli_profile: env::var("AI_CLI_PROFILE")
                 .or_else(|_| env::var("CODEX_PROFILE"))
                 .ok()
@@ -144,6 +156,31 @@ impl AppConfig {
             workspace_dir: paths.root_dir.join("data/workspace"),
         }
     }
+}
+
+fn routed_openai_model(key: &str) -> String {
+    env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env::var("OPENAI_MODEL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "gpt-4.1-mini".to_string())
+}
+
+fn routed_cli_model(key: &str, default: &str) -> String {
+    env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env::var("AI_CLI_MODEL")
+                .or_else(|_| env::var("CODEX_MODEL"))
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| default.to_string())
 }
 
 #[derive(Debug, Clone)]

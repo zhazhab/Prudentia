@@ -89,6 +89,18 @@ export type ConversationRunPhase =
   | "canceled"
   | "interrupted";
 
+export type TaskRouteReason =
+  | "social_turn"
+  | "short_question"
+  | "subject_clarification"
+  | "attachment_analysis"
+  | "investment_system"
+  | "multi_part_request"
+  | "long_request"
+  | "explicit_deep_analysis"
+  | "company_research"
+  | "standard_conversation";
+
 export interface ConversationRun {
   id: string;
   client_request_id: string;
@@ -99,6 +111,11 @@ export interface ConversationRun {
   status: ConversationRunStatus;
   phase: ConversationRunPhase;
   provider?: string | null;
+  task_complexity?: "simple" | "standard" | "deep" | string | null;
+  model?: string | null;
+  route_reason?: TaskRouteReason | null;
+  activity?: string | null;
+  source_count?: number | null;
   error_code?: string | null;
   error_message?: string | null;
   started_at: string;
@@ -118,6 +135,7 @@ export interface RunEvent {
 export interface ConversationAction {
   id: string;
   run_id: string;
+  assistant_message_id?: string | null;
   thread_id: string;
   action_type: "company_view_patch" | "trade_record" | "rule_graph_patch" | string;
   title: string;
@@ -414,10 +432,16 @@ export interface AiSettings {
   provider_chain: string[];
   openai_base_url: string;
   openai_model: string;
+  openai_model_simple: string;
+  openai_model_standard: string;
+  openai_model_deep: string;
   has_openai_api_key: boolean;
   cli_provider: "codex" | string;
   cli_path: string;
   cli_model?: string | null;
+  cli_model_simple: string;
+  cli_model_standard: string;
+  cli_model_deep: string;
   cli_profile?: string | null;
   cli_login_command?: string | null;
 }
@@ -427,9 +451,15 @@ export interface UpdateAiSettings {
   openai_api_key?: string;
   openai_base_url?: string;
   openai_model?: string;
+  openai_model_simple?: string;
+  openai_model_standard?: string;
+  openai_model_deep?: string;
   cli_provider?: string;
   cli_path?: string;
   cli_model?: string;
+  cli_model_simple?: string;
+  cli_model_standard?: string;
+  cli_model_deep?: string;
   cli_profile?: string;
   persist_to_env?: boolean;
 }

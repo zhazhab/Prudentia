@@ -8,9 +8,10 @@ use tokio::sync::mpsc;
 use crate::{
     ai::{
         prompt::{
-            conversation_projection_prompt, conversation_response_prompt, extract_json_object,
+            conversation_projection_prompt, conversation_response_prompt,
             investment_system_refinement_prompt, memo_chat_prompt, memo_extraction_prompt,
-            portfolio_review_prompt, research_distillation_prompt, stock_snapshot_prompt,
+            parse_json_object, portfolio_review_prompt, research_distillation_prompt,
+            stock_snapshot_prompt,
         },
         AiError, AiProvider, AiProviderEvent, ConversationContext, ConversationProjection,
         InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioImageRecognition,
@@ -117,15 +118,8 @@ impl OpenAiCompatibleProvider {
             .content
             .trim();
 
-        let json = extract_json_object(content).ok_or_else(|| {
-            AiError::Provider("AI response did not include a JSON object".to_string())
-        })?;
-
-        serde_json::from_str(json).map_err(|err| {
-            AiError::Provider(format!(
-                "failed to parse AI JSON response: {err}. response: {json}"
-            ))
-        })
+        parse_json_object(content)
+            .map_err(|err| AiError::Provider(format!("failed to parse AI JSON response: {err}")))
     }
 
     async fn chat_stream(
@@ -165,6 +159,7 @@ impl OpenAiCompatibleProvider {
         let mut stream = response.bytes_stream();
         let mut pending = String::new();
         let mut complete = String::new();
+        let mut writing_started = false;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|err| AiError::Provider(err.to_string()))?;
             pending.push_str(&String::from_utf8_lossy(&chunk));
@@ -172,14 +167,12 @@ impl OpenAiCompatibleProvider {
                 let line = pending[..index].trim().to_string();
                 pending.drain(..=index);
                 if let Some(delta) = parse_sse_delta(&line)? {
-                    complete.push_str(&delta);
-                    let _ = events.send(AiProviderEvent::TextDelta(delta));
+                    emit_stream_delta(&events, &mut complete, &mut writing_started, delta);
                 }
             }
         }
         if let Some(delta) = parse_sse_delta(pending.trim())? {
-            complete.push_str(&delta);
-            let _ = events.send(AiProviderEvent::TextDelta(delta));
+            emit_stream_delta(&events, &mut complete, &mut writing_started, delta);
         }
         if complete.trim().is_empty() {
             return Err(AiError::Provider("AI response had no text".to_string()));
@@ -331,4 +324,64 @@ fn parse_sse_delta(line: &str) -> Result<Option<String>, AiError> {
         .into_iter()
         .find_map(|choice| choice.delta.content)
         .filter(|content| !content.is_empty()))
+}
+
+fn emit_stream_delta(
+    events: &mpsc::UnboundedSender<AiProviderEvent>,
+    complete: &mut String,
+    writing_started: &mut bool,
+    delta: String,
+) {
+    if !*writing_started {
+        let _ = events.send(AiProviderEvent::Stage {
+            provider: "openai".to_string(),
+            stage: "provider_writing_response".to_string(),
+        });
+        *writing_started = true;
+    }
+    complete.push_str(&delta);
+    let _ = events.send(AiProviderEvent::TextDelta(delta));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_sse_delta_emits_a_truthful_writing_stage_once() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut complete = String::new();
+        let mut writing_started = false;
+
+        emit_stream_delta(
+            &events,
+            &mut complete,
+            &mut writing_started,
+            "hello".to_string(),
+        );
+        emit_stream_delta(
+            &events,
+            &mut complete,
+            &mut writing_started,
+            " world".to_string(),
+        );
+
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(AiProviderEvent::Stage {
+                provider: "openai".to_string(),
+                stage: "provider_writing_response".to_string(),
+            })
+        );
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(AiProviderEvent::TextDelta("hello".to_string()))
+        );
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(AiProviderEvent::TextDelta(" world".to_string()))
+        );
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(complete, "hello world");
+    }
 }

@@ -29,6 +29,7 @@ pub async fn prepare_action(
                     AppError::bad_request(format!("invalid company view proposal: {error}"))
                 })?;
             patch.symbol = patch.symbol.trim().to_ascii_uppercase();
+            strip_conversation_valuation_change(&mut patch);
             let version = load_company_view(pool, &patch.symbol)
                 .await?
                 .map(|view| view.current_version)
@@ -66,6 +67,10 @@ pub async fn prepare_action(
             "unsupported conversation action {other}"
         ))),
     }
+}
+
+fn strip_conversation_valuation_change(patch: &mut CompanyViewPatch) {
+    patch.changes.valuation_expectations = None;
 }
 
 pub async fn execute_action(
@@ -145,7 +150,8 @@ async fn execute_action_inner(
 ) -> AppResult<Value> {
     match action.action_type.as_str() {
         "company_view_patch" => {
-            let patch: CompanyViewPatch = serde_json::from_value(action.payload.clone())?;
+            let mut patch: CompanyViewPatch = serde_json::from_value(action.payload.clone())?;
+            strip_conversation_valuation_change(&mut patch);
             let view = apply_company_view_patch(
                 pool,
                 workspace_dir,
@@ -171,5 +177,33 @@ async fn execute_action_inner(
             Ok(serde_json::to_value(version)?)
         }
         _ => Err(AppError::bad_request("unsupported conversation action")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_conversation_valuation_change;
+    use crate::conversation::types::{CompanyViewChanges, CompanyViewPatch};
+
+    #[test]
+    fn automatic_company_patch_cannot_propose_valuation_content() {
+        let mut patch = CompanyViewPatch {
+            symbol: "PDD".to_string(),
+            company_name: "PDD Holdings".to_string(),
+            base_version: 0,
+            changes: CompanyViewChanges {
+                business_quality: Some("operating evidence".to_string()),
+                valuation_expectations: Some("must not persist".to_string()),
+                ..CompanyViewChanges::default()
+            },
+        };
+
+        strip_conversation_valuation_change(&mut patch);
+
+        assert_eq!(
+            patch.changes.business_quality.as_deref(),
+            Some("operating evidence")
+        );
+        assert_eq!(patch.changes.valuation_expectations, None);
     }
 }

@@ -22,6 +22,8 @@ mod context;
 mod engine;
 mod research;
 mod storage;
+mod subject_resolution;
+mod task_routing;
 mod types;
 
 pub use engine::ConversationEngine;
@@ -74,6 +76,26 @@ fn is_simple_social_turn(message: &str) -> bool {
             | "who are you"
             | "what can you do"
     )
+}
+
+fn requests_local_context_only(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "只根据",
+        "仅根据",
+        "只使用",
+        "仅使用",
+        "不要检索",
+        "无需检索",
+        "不查外部",
+        "不使用外部",
+        "only use local",
+        "only use the existing",
+        "without external research",
+        "do not research",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 pub fn routes() -> Router<AppState> {

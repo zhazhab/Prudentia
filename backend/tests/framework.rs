@@ -11,9 +11,12 @@ use axum::{
 use prudentia_backend::{
     ai::{
         cli::{CliProviderKind, CliSettings},
-        runtime::{AiProviderKind, AiRuntime, AiSettings, UpdateAiSettingsRequest},
+        runtime::{
+            AiProviderKind, AiRuntime, AiSettings, ModelTierSettings, UpdateAiSettingsRequest,
+        },
     },
     ai_ws::{AiWsClientMessage, AiWsServerMessage},
+    config::{AppConfig, WebResearchProviderKind},
     conversation::{ConversationThreadDetail, StartRunResponse},
     database,
     decision::{self, CreateDecisionRequest},
@@ -230,6 +233,12 @@ async fn conversation_run_persists_events_and_natural_assistant_message() {
         detail.latest_run.as_ref().map(|run| run.status.as_str()),
         Some("completed")
     );
+    let latest_run = detail.latest_run.as_ref().expect("latest run");
+    assert_eq!(latest_run.task_complexity.as_deref(), Some("simple"));
+    assert_eq!(latest_run.model.as_deref(), Some("mock"));
+    assert_eq!(latest_run.route_reason.as_deref(), Some("social_turn"));
+    assert_eq!(latest_run.activity.as_deref(), Some("generating"));
+    assert_eq!(latest_run.source_count, Some(0));
 
     let event_types = sqlx::query_scalar::<_, String>(
         "SELECT event_type FROM conversation_run_events WHERE run_id = ? ORDER BY event_id",
@@ -239,8 +248,25 @@ async fn conversation_run_persists_events_and_natural_assistant_message() {
     .await
     .expect("events");
     assert!(event_types.contains(&"run.accepted".to_string()));
-    assert!(event_types.contains(&"message.delta".to_string()));
+    assert!(event_types.contains(&"run.classified".to_string()));
+    assert!(event_types.contains(&"run.routed".to_string()));
+    assert!(event_types.contains(&"message.completed".to_string()));
     assert!(event_types.contains(&"run.completed".to_string()));
+    assert!(
+        !event_types.contains(&"message.delta".to_string()),
+        "terminal runs should compact deltas already represented by the final message"
+    );
+
+    let routed_model = sqlx::query_scalar::<_, String>(
+        r#"SELECT json_extract(payload_json, '$.run.model')
+        FROM conversation_run_events
+        WHERE run_id = ? AND event_type = 'run.routed'"#,
+    )
+    .bind(&accepted.run.id)
+    .fetch_one(&pool)
+    .await
+    .expect("routed run snapshot");
+    assert_eq!(routed_model, "mock");
 
     let phases = sqlx::query_scalar::<_, String>(
         r#"SELECT json_extract(payload_json, '$.phase')
@@ -256,6 +282,219 @@ async fn conversation_run_persists_events_and_natural_assistant_message() {
         !phases.contains(&"extracting_actions".to_string()),
         "casual greetings must not start a second action-projection model call"
     );
+}
+
+#[tokio::test]
+async fn ambiguous_company_turn_asks_for_confirmation_without_bound_company_context() {
+    let pool = test_pool().await;
+    sqlx::query(
+        r#"INSERT INTO security_symbols (symbol, name, market, currency, updated_at) VALUES
+        ('9988.HK', '阿里巴巴－Ｗ', 'HK', 'HKD', '2026-01-01T00:00:00Z'),
+        ('0241.HK', '阿里健康', 'HK', 'HKD', '2026-01-01T00:00:00Z')"#,
+    )
+    .execute(&pool)
+    .await
+    .expect("insert ambiguous companies");
+    let mut config = AppConfig::from_env();
+    config.web_research_provider = WebResearchProviderKind::Disabled;
+    let app = startup::build_router_with_config(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(MockMarketDataProvider),
+        &config,
+    );
+
+    let seed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "client_request_id":"clarification-seed",
+                      "client_thread_id":"clarification-thread",
+                      "content":"你好",
+                      "locale":"zh-CN"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("seed response");
+    let body = to_bytes(seed.into_body(), 1024 * 1024)
+        .await
+        .expect("seed body");
+    let accepted: StartRunResponse = serde_json::from_slice(&body).expect("seed json");
+    let thread_id = accepted.thread.thread.id;
+    wait_for_conversation(&app, &thread_id).await;
+
+    let subject = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/conversation/threads/{thread_id}/subject"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"company","subject_key":"PDD","label":"拼多多"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("subject response");
+    assert_eq!(subject.status(), StatusCode::OK);
+    let summary_before =
+        sqlx::query_scalar::<_, String>("SELECT summary FROM memo_threads WHERE id = ?")
+            .bind(&thread_id)
+            .fetch_one(&pool)
+            .await
+            .expect("bound summary");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                      "client_request_id":"ambiguous-company-turn",
+                      "thread_id":"{thread_id}",
+                      "content":"分析一下阿里",
+                      "locale":"zh-CN"
+                    }}"#,
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("clarification response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("clarification body");
+    let clarification_run: StartRunResponse = serde_json::from_slice(&body).expect("run json");
+    let detail = wait_for_conversation(&app, &thread_id).await;
+    let run = detail.latest_run.as_ref().expect("latest run");
+    let assistant = detail.messages.last().expect("assistant message");
+
+    assert_eq!(
+        run.status, "completed",
+        "clarification run failed: {:?} {:?}",
+        run.error_code, run.error_message
+    );
+    assert_eq!(run.task_complexity.as_deref(), Some("simple"));
+    assert_eq!(run.route_reason.as_deref(), Some("subject_clarification"));
+    assert_eq!(run.source_count, Some(0));
+    assert!(assistant.content.contains("请确认"));
+    assert!(assistant.sources.is_empty());
+    assert_eq!(assistant.used_context.len(), 1);
+    assert_eq!(
+        assistant.used_context[0]
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some("subject_clarification")
+    );
+    assert_eq!(
+        assistant.used_context[0]
+            .get("original_request")
+            .and_then(serde_json::Value::as_str),
+        Some("分析一下阿里")
+    );
+    assert_eq!(
+        assistant.used_context[0]
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(2)
+    );
+    assert!(!assistant
+        .used_context
+        .iter()
+        .any(|context| context.to_string().contains("PDD")));
+    assert_eq!(detail.thread.subject.subject_key.as_deref(), Some("PDD"));
+    assert_eq!(detail.thread.thread.summary, summary_before);
+    let source_count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM conversation_sources WHERE run_id = ?")
+            .bind(&clarification_run.run.id)
+            .fetch_one(&pool)
+            .await
+            .expect("source count");
+    assert_eq!(source_count, 0);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                      "client_request_id":"confirmed-company-turn",
+                      "thread_id":"{thread_id}",
+                      "content":"9988.HK",
+                      "locale":"zh-CN"
+                    }}"#,
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("confirmation response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let detail = wait_for_conversation(&app, &thread_id).await;
+    let run = detail.latest_run.as_ref().expect("confirmed run");
+    let assistant = detail.messages.last().expect("confirmed assistant");
+    let run_events = sqlx::query_as::<_, (String, String)>(
+        "SELECT event_type, payload_json FROM conversation_run_events WHERE run_id = ? ORDER BY event_id",
+    )
+    .bind(&run.id)
+    .fetch_all(&pool)
+    .await
+    .expect("confirmed run events");
+
+    assert_eq!(
+        run.status, "completed",
+        "confirmed run failed: {:?} {:?}; events: {:?}",
+        run.error_code, run.error_message, run_events
+    );
+    assert_ne!(run.route_reason.as_deref(), Some("subject_clarification"));
+    assert!(assistant.used_context.iter().any(|context| {
+        context.get("kind").and_then(serde_json::Value::as_str) == Some("company")
+            && context.get("label").and_then(serde_json::Value::as_str) == Some("9988.HK")
+    }));
+    assert!(!assistant
+        .used_context
+        .iter()
+        .any(|context| context.to_string().contains("PDD")));
+    assert_eq!(detail.thread.subject.subject_key.as_deref(), Some("PDD"));
+}
+
+async fn wait_for_conversation(app: &axum::Router, thread_id: &str) -> ConversationThreadDetail {
+    for _ in 0..50 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/conversation/threads/{thread_id}"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("thread response");
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("thread body");
+        let detail: ConversationThreadDetail = serde_json::from_slice(&body).expect("thread json");
+        if detail.thread.active_run.is_none() {
+            return detail;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("conversation should complete");
 }
 
 #[tokio::test]
@@ -2143,7 +2382,9 @@ async fn research_routes_create_and_list_distillations() {
             openai_api_key: None,
             openai_base_url: "https://api.openai.com/v1".to_string(),
             openai_model: "gpt-4.1-mini".to_string(),
+            openai_models: model_tiers("gpt-4.1-mini"),
             cli: CliSettings::default(),
+            cli_models: model_tiers("gpt-5.4"),
         },
         ".env",
     ));
@@ -2794,12 +3035,14 @@ fn ai_settings_update_can_persist_env_without_echoing_secret() {
             openai_api_key: None,
             openai_base_url: "https://api.openai.com/v1".to_string(),
             openai_model: "gpt-4.1-mini".to_string(),
+            openai_models: model_tiers("gpt-4.1-mini"),
             cli: CliSettings {
                 provider: CliProviderKind::Codex,
                 path: "codex".to_string(),
                 model: None,
                 profile: None,
             },
+            cli_models: model_tiers("gpt-5.4"),
         },
         &env_path,
     );
@@ -2810,9 +3053,15 @@ fn ai_settings_update_can_persist_env_without_echoing_secret() {
             openai_api_key: Some("sk-test".to_string()),
             openai_base_url: None,
             openai_model: None,
+            openai_model_simple: None,
+            openai_model_standard: None,
+            openai_model_deep: None,
             cli_provider: Some("codex".to_string()),
             cli_path: Some("codex".to_string()),
             cli_model: Some("gpt-5.4".to_string()),
+            cli_model_simple: None,
+            cli_model_standard: None,
+            cli_model_deep: None,
             cli_profile: Some("personal".to_string()),
             persist_to_env: Some(true),
         })
@@ -2827,6 +3076,9 @@ fn ai_settings_update_can_persist_env_without_echoing_secret() {
     assert!(env.contains("OPENAI_API_KEY=sk-test"));
     assert!(env.contains("AI_CLI_PROVIDER=codex"));
     assert!(env.contains("AI_CLI_MODEL=gpt-5.4"));
+    assert!(env.contains("AI_CLI_MODEL_SIMPLE=gpt-5.4"));
+    assert!(env.contains("AI_CLI_MODEL_STANDARD=gpt-5.4"));
+    assert!(env.contains("AI_CLI_MODEL_DEEP=gpt-5.4"));
     assert!(env.contains("AI_CLI_PROFILE=personal"));
 }
 
@@ -2969,15 +3221,25 @@ fn mock_ai_runtime() -> AiRuntime {
             openai_api_key: None,
             openai_base_url: "https://api.openai.com/v1".to_string(),
             openai_model: "gpt-4.1-mini".to_string(),
+            openai_models: model_tiers("gpt-4.1-mini"),
             cli: CliSettings {
                 provider: CliProviderKind::Codex,
                 path: "codex".to_string(),
                 model: None,
                 profile: None,
             },
+            cli_models: model_tiers("gpt-5.4"),
         },
         ".env.test",
     )
+}
+
+fn model_tiers(model: &str) -> ModelTierSettings {
+    ModelTierSettings {
+        simple: model.to_string(),
+        standard: model.to_string(),
+        deep: model.to_string(),
+    }
 }
 
 fn assert_research_analysis_arrays_non_empty(analysis: &prudentia_backend::ai::ResearchAnalysis) {

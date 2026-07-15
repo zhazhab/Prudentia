@@ -106,7 +106,20 @@ pub struct ConversationContext {
     pub attachments: Vec<ConversationAttachmentContext>,
     pub research_sources: Vec<ConversationResearchSource>,
     pub research_warning: Option<String>,
+    pub subject_clarification: Option<ConversationSubjectClarification>,
     pub used_context: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationSubjectClarification {
+    pub target_hint: Option<String>,
+    pub candidates: Vec<ConversationSubjectCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationSubjectCandidate {
+    pub symbol: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,7 +158,16 @@ pub struct ConversationActionDraft {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiProviderEvent {
-    Stage { provider: String, stage: String },
+    RouteSelected {
+        provider: String,
+        model: String,
+        complexity: String,
+        reason: String,
+    },
+    Stage {
+        provider: String,
+        stage: String,
+    },
     TextDelta(String),
 }
 

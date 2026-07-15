@@ -14,16 +14,21 @@ use tokio::{
 };
 use uuid::Uuid;
 
+pub mod codex;
+mod projection;
 mod usage;
+use codex::codex_provider_stage;
+use projection::CliConversationProjection;
 use usage::log_cli_token_usage;
 
 use crate::{
     ai::{
         prompt::{
-            conversation_projection_prompt, conversation_response_prompt, extract_json_object,
-            investment_system_refinement_prompt, memo_chat_prompt, memo_extraction_prompt,
-            portfolio_image_recognition_prompt, portfolio_image_recognition_schema,
-            portfolio_review_prompt, research_distillation_prompt, stock_snapshot_prompt,
+            conversation_projection_cli_prompt, conversation_projection_schema,
+            conversation_response_prompt, investment_system_refinement_prompt, memo_chat_prompt,
+            memo_extraction_prompt, parse_json_object, portfolio_image_recognition_prompt,
+            portfolio_image_recognition_schema, portfolio_review_prompt,
+            research_distillation_prompt, stock_snapshot_prompt,
         },
         AiError, AiProvider, AiProviderEvent, ConversationContext, ConversationProjection,
         InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioImageRecognition,
@@ -85,6 +90,12 @@ impl Default for CliSettings {
 pub trait CliBackend: Clone + Send + Sync + 'static {
     fn kind(&self) -> CliProviderKind;
     fn build_command(&self, settings: &CliSettings, prompt: String) -> CliCommand;
+    fn build_json_command(
+        &self,
+        settings: &CliSettings,
+        schema_path: Option<&Path>,
+        prompt: String,
+    ) -> CliCommand;
     fn build_image_command(
         &self,
         settings: &CliSettings,
@@ -127,6 +138,13 @@ where
         T: DeserializeOwned + Send + 'static,
     {
         run_cli_json(&self.backend, &self.settings, prompt).await
+    }
+
+    async fn run_json_with_schema<T>(&self, prompt: String, schema: &str) -> Result<T, AiError>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        run_cli_json_with_schema(&self.backend, &self.settings, prompt, schema).await
     }
 
     async fn run_image_json<T>(&self, image_path: PathBuf, prompt: String) -> Result<T, AiError>
@@ -179,12 +197,13 @@ where
         assistant_response: &str,
         locale: Locale,
     ) -> Result<ConversationProjection, AiError> {
-        self.run_json(conversation_projection_prompt(
-            context,
-            assistant_response,
-            locale,
-        ))
-        .await
+        let projection: CliConversationProjection = self
+            .run_json_with_schema(
+                conversation_projection_cli_prompt(context, assistant_response, locale),
+                conversation_projection_schema(),
+            )
+            .await?;
+        projection.try_into()
     }
 
     async fn respond_to_memo_chat(
@@ -256,6 +275,25 @@ where
     B: CliBackend,
 {
     let command_spec = backend.build_command(settings, prompt);
+    run_cli_command_json(backend, settings, command_spec).await
+}
+
+async fn run_cli_json_with_schema<T, B>(
+    backend: &B,
+    settings: &CliSettings,
+    prompt: String,
+    schema: &str,
+) -> Result<T, AiError>
+where
+    T: DeserializeOwned,
+    B: CliBackend,
+{
+    let schema_file = TemporaryCliFile::write(
+        "prudentia-conversation-projection-schema",
+        "json",
+        schema.as_bytes(),
+    )?;
+    let command_spec = backend.build_json_command(settings, Some(schema_file.path()), prompt);
     run_cli_command_json(backend, settings, command_spec).await
 }
 
@@ -399,21 +437,7 @@ where
     );
 
     let response_text = cli_response_text(stdout.as_ref(), output_last_message.as_ref());
-    let json = extract_json_object(response_text.trim()).ok_or_else(|| {
-        tracing::warn!(
-            invocation_id = %invocation_id,
-            provider = backend.kind().as_str(),
-            program = %command_spec.program,
-            stdout_bytes = output.stdout.len(),
-            "AI CLI command returned no JSON object"
-        );
-        AiError::Provider(format!(
-            "{} CLI did not return a JSON object",
-            backend.kind().as_str()
-        ))
-    })?;
-
-    serde_json::from_str(json).map_err(|err| {
+    parse_json_object(response_text.trim()).map_err(|err| {
         tracing::warn!(
             invocation_id = %invocation_id,
             provider = backend.kind().as_str(),
@@ -422,7 +446,7 @@ where
             "AI CLI JSON parse failed"
         );
         AiError::Provider(format!(
-            "failed to parse {} CLI JSON response: {err}. response: {json}",
+            "failed to parse {} CLI JSON response: {err}",
             backend.kind().as_str()
         ))
     })
@@ -646,21 +670,6 @@ fn add_image_arguments(command: &mut CliCommand, image_paths: &[&str]) {
     }
 }
 
-fn codex_provider_stage(line: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
-    let event_type = value.get("type")?.as_str()?;
-    let stage = match event_type {
-        "thread.started" => "provider_ready",
-        "turn.started" => "model_running",
-        "item.started" => "provider_item_started",
-        "item.completed" => "provider_item_completed",
-        "turn.completed" => "provider_completed",
-        "turn.failed" => "provider_failed",
-        _ => return None,
-    };
-    Some(stage.to_string())
-}
-
 fn add_codex_json_capture(command: &mut CliCommand, output_last_message_path: &Path) {
     let insert_at = command.args.len().saturating_sub(1);
     command.args.insert(insert_at, "--json".to_string());
@@ -731,8 +740,6 @@ impl Drop for TemporaryCliFile {
         }
     }
 }
-
-pub mod codex;
 
 #[cfg(test)]
 mod tests {

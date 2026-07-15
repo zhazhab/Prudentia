@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type DragEvent,
   type FormEvent,
   useEffect,
@@ -29,6 +30,7 @@ import { ConversationMessage } from "../components/ConversationMessage";
 import { EmptyState } from "../components/EmptyState";
 import { useI18n } from "../i18n";
 import type {
+  ConversationAction,
   ConversationAttachment,
   ConversationRun,
   ConversationRunPhase,
@@ -40,14 +42,19 @@ import {
   chatHomeDefaultThreadId,
   formatThreadTime,
   type LiveConversationRun,
+  mergeStoredActiveRun,
   mergeConversationMessages,
   memoChatElapsedSeconds,
+  placeConversationActions,
+  parseTaskRouteReason,
+  runActivityDescriptor,
+  taskComplexityKey,
+  taskRouteReasonKey,
+  shouldScrollConversationToBottom,
   shouldSubmitComposerMessage,
   shortThreadTitle,
   threadRailItems
 } from "./homeRules";
-
-const lastThreadStorageKey = "prudentia.lastThreadId";
 
 type LiveRun = LiveConversationRun;
 
@@ -59,9 +66,7 @@ export function HomePage() {
   const activeRuns = useQuery({ queryKey: ["conversation-runs", "active"], queryFn: api.activeConversationRuns });
   const positions = useQuery({ queryKey: ["positions"], queryFn: () => api.positions() });
   const summary = useQuery({ queryKey: ["portfolio-summary"], queryFn: api.portfolioSummary });
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(() =>
-    window.localStorage.getItem(lastThreadStorageKey)
-  );
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ConversationAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -77,6 +82,7 @@ export function HomePage() {
   const [mobilePanel, setMobilePanel] = useState<"threads" | "context" | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const pinnedThreadRef = useRef<string | null>(null);
 
   const activeDetail = useQuery({
     queryKey: ["conversation-thread", activeThreadId],
@@ -98,6 +104,10 @@ export function HomePage() {
       ),
     [activeDetail.data?.messages, activeRun, activeThreadId, optimisticMessages]
   );
+  const actionPlacement = useMemo(
+    () => placeConversationActions(messages, activeDetail.data?.actions ?? []),
+    [activeDetail.data?.actions, messages]
+  );
 
   useEffect(() => {
     if (!threads.data) return;
@@ -105,23 +115,16 @@ export function HomePage() {
       if (current && (isClientThreadId(current) || threads.data.some((thread) => thread.id === current))) {
         return current;
       }
-      const next = chatHomeDefaultThreadId(threads.data, window.localStorage.getItem(lastThreadStorageKey));
-      if (next) window.localStorage.setItem(lastThreadStorageKey, next);
-      return next;
+      return chatHomeDefaultThreadId(threads.data);
     });
   }, [threads.data]);
-
-  useEffect(() => {
-    if (!activeThreadId || isClientThreadId(activeThreadId)) return;
-    window.localStorage.setItem(lastThreadStorageKey, activeThreadId);
-  }, [activeThreadId]);
 
   useEffect(() => {
     if (!activeRuns.data) return;
     setRunsByThread((current) => {
       const next = { ...current };
       activeRuns.data.forEach((run) => {
-        next[run.thread_id] = { ...toLiveRun(run), streamContent: next[run.thread_id]?.streamContent ?? "" };
+        next[run.thread_id] = mergeStoredActiveRun(toLiveRun(run), next[run.thread_id]);
       });
       return next;
     });
@@ -138,9 +141,16 @@ export function HomePage() {
   useEffect(() => {
     const list = messageListRef.current;
     if (!list) return;
-    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 140;
-    if (nearBottom) list.scrollTop = list.scrollHeight;
-  }, [messages.length, activeRun?.streamContent]);
+    const threadId = activeDetail.data?.thread.id ?? activeThreadId;
+    const shouldScroll = shouldScrollConversationToBottom({
+      threadId,
+      pinnedThreadId: pinnedThreadRef.current,
+      messageCount: messages.length,
+      distanceFromBottom: list.scrollHeight - list.scrollTop - list.clientHeight
+    });
+    if (shouldScroll) list.scrollTop = list.scrollHeight;
+    if (threadId && messages.length) pinnedThreadRef.current = threadId;
+  }, [activeDetail.data?.thread.id, activeRun?.streamContent, activeThreadId, messages.length]);
 
   useEffect(() => {
     if (!mobilePanel) return;
@@ -232,7 +242,6 @@ export function HomePage() {
       }));
       setActiveThreadId(response.run.thread_id);
       setAttachments([]);
-      window.localStorage.setItem(lastThreadStorageKey, response.run.thread_id);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["conversation-threads"] }),
         queryClient.invalidateQueries({ queryKey: ["conversation-thread", response.run.thread_id] })
@@ -312,6 +321,21 @@ export function HomePage() {
       next[to] = [...(next[to] ?? []), ...moved];
       return next;
     });
+  }
+
+  function renderActionCard(action: ConversationAction) {
+    return (
+      <ConversationActionCard
+        key={action.id}
+        action={action}
+        companyView={activeDetail.data?.company_view}
+        positions={positions.data ?? []}
+        busy={busyActionId === action.id}
+        onEdit={(payload) => mutateAction(action.id, () => api.updateConversationAction(action.id, payload))}
+        onConfirm={() => mutateAction(action.id, () => api.confirmConversationAction(action.id, action.target_version))}
+        onReject={() => mutateAction(action.id, () => api.rejectConversationAction(action.id))}
+      />
+    );
   }
 
   return (
@@ -396,10 +420,10 @@ export function HomePage() {
             </div>
           ) : null}
           <div className="mobile-chat-controls">
-            <button type="button" onClick={() => setMobilePanel("threads")} title={t("home.openThreads")} aria-label={t("home.openThreads")}>
+            <button className="mobile-threads-trigger" type="button" onClick={() => setMobilePanel("threads")} title={t("home.openThreads")} aria-label={t("home.openThreads")}>
               <PanelLeftOpen size={18} />
             </button>
-            <button type="button" onClick={() => setMobilePanel("context")} title={t("home.openContext")} aria-label={t("home.openContext")}>
+            <button className="mobile-context-trigger" type="button" onClick={() => setMobilePanel("context")} title={t("home.openContext")} aria-label={t("home.openContext")}>
               <PanelRightOpen size={18} />
             </button>
           </div>
@@ -409,7 +433,12 @@ export function HomePage() {
           {messages.length ? (
             messages.map((message) => {
               const run = Object.values(runsByThread).find((candidate) => candidate.client_request_id === message.request_id);
-              return <ConversationMessage key={message.id} message={message} onRetry={run && ["failed", "canceled", "interrupted"].includes(run.status) ? () => void retryRun(run.id) : undefined} />;
+              return (
+                <Fragment key={message.id}>
+                  <ConversationMessage message={message} onRetry={run && ["failed", "canceled", "interrupted"].includes(run.status) ? () => void retryRun(run.id) : undefined} />
+                  {(actionPlacement.byMessageId[message.id] ?? []).map(renderActionCard)}
+                </Fragment>
+              );
             })
           ) : activeDetail.isLoading ? (
             <div className="chat-empty">{t("home.loadingThread")}</div>
@@ -421,18 +450,7 @@ export function HomePage() {
             <RunStatus run={activeRun} now={runtimeNow} onRetry={() => void retryRun(activeRun.id)} />
           ) : null}
 
-          {activeDetail.data?.actions.map((action) => (
-            <ConversationActionCard
-              key={action.id}
-              action={action}
-              companyView={activeDetail.data?.company_view}
-              positions={positions.data ?? []}
-              busy={busyActionId === action.id}
-              onEdit={(payload) => mutateAction(action.id, () => api.updateConversationAction(action.id, payload))}
-              onConfirm={() => mutateAction(action.id, () => api.confirmConversationAction(action.id, action.target_version))}
-              onReject={() => mutateAction(action.id, () => api.rejectConversationAction(action.id))}
-            />
-          ))}
+          {actionPlacement.unplacedActive.map(renderActionCard)}
         </div>
 
         {connectionError ? <div className="warning-box">{t("home.connectionError", { error: connectionError })}</div> : null}
@@ -488,6 +506,20 @@ export function HomePage() {
 function RunStatus({ run, now, onRetry }: { run: LiveRun; now: number; onRetry: () => void }) {
   const { t } = useI18n();
   const terminal = ["failed", "canceled", "interrupted"].includes(run.status);
+  const activity = runActivityDescriptor(run);
+  const complexityKey = taskComplexityKey(run.task_complexity);
+  const reasonKey = taskRouteReasonKey(run.route_reason);
+  const routeParts = [
+    complexityKey ? t(complexityKey) : null,
+    run.model ?? null,
+    run.provider ? t("home.runProvider", { provider: run.provider }) : null,
+    t("home.runtimeElapsed", {
+      seconds: memoChatElapsedSeconds(
+        Date.parse(run.started_at),
+        run.finished_at ? Date.parse(run.finished_at) : now
+      )
+    })
+  ].filter((part): part is string => Boolean(part));
   return (
     <div className={`conversation-run-status ${terminal ? "terminal" : ""}`} role="status">
       {terminal ? null : <LoaderCircle className="backend-runtime-spinner" size={17} />}
@@ -499,18 +531,10 @@ function RunStatus({ run, now, onRetry }: { run: LiveRun; now: number; onRetry: 
               ? t("home.runCanceled")
               : run.status === "failed"
                 ? t("home.runFailed")
-                : phaseLabel(run.phase, t)}
+                : t(activity.key, activity.params)}
         </strong>
-        <span>
-          {run.provider ? t("home.runProvider", { provider: run.provider }) : null}
-          {run.providerStage ? ` · ${run.providerStage}` : null}
-          {` · ${t("home.runtimeElapsed", {
-            seconds: memoChatElapsedSeconds(
-              Date.parse(run.started_at),
-              run.finished_at ? Date.parse(run.finished_at) : now
-            )
-          })}`}
-        </span>
+        <span>{routeParts.join(" · ")}</span>
+        {reasonKey && !terminal ? <em>{t(reasonKey)}</em> : null}
         {run.error_message ? <em>{run.error_message}</em> : null}
       </div>
       {terminal ? <button type="button" onClick={onRetry} title={t("home.retry")}><RotateCcw size={15} /></button> : null}
@@ -526,7 +550,26 @@ function reduceRunEvent(current: Record<string, LiveRun>, event: RunEvent) {
     next.status = "running";
     next.phase = String(event.payload.phase ?? next.phase) as ConversationRunPhase;
     next.provider = typeof event.payload.provider === "string" ? event.payload.provider : next.provider;
-    next.providerStage = typeof event.payload.provider_stage === "string" ? event.payload.provider_stage : next.providerStage;
+    const detail = event.payload.detail && typeof event.payload.detail === "object"
+      ? event.payload.detail as Record<string, unknown>
+      : undefined;
+    next.providerStage = typeof event.payload.provider_stage === "string"
+      ? event.payload.provider_stage
+      : typeof detail?.activity === "string"
+        ? detail.activity
+        : next.providerStage;
+    next.sourceCount = typeof detail?.source_count === "number"
+      ? detail.source_count
+      : next.sourceCount;
+  } else if (event.event_type === "run.classified" || event.event_type === "run.routed") {
+    next.task_complexity = typeof event.payload.task_complexity === "string"
+      ? event.payload.task_complexity
+      : next.task_complexity;
+    next.route_reason = parseTaskRouteReason(event.payload.route_reason) ?? next.route_reason;
+    next.model = typeof event.payload.model === "string" ? event.payload.model : next.model;
+    next.provider = typeof event.payload.provider === "string"
+      ? event.payload.provider
+      : next.provider;
   } else if (event.event_type === "message.delta") {
     next.streamContent += String(event.payload.content ?? "");
     next.messageId = typeof event.payload.message_id === "string" ? event.payload.message_id : next.messageId;
@@ -551,7 +594,12 @@ function eventRun(event: RunEvent): LiveRun | null {
 }
 
 function toLiveRun(run: ConversationRun): LiveRun {
-  return { ...run, streamContent: "" };
+  return {
+    ...run,
+    streamContent: "",
+    providerStage: run.activity ?? undefined,
+    sourceCount: run.source_count ?? undefined
+  };
 }
 
 function maybeLiveRun(run?: ConversationRun | null): LiveRun | undefined {
@@ -566,19 +614,6 @@ function optimisticUserMessage(threadId: string, requestId: string, content: str
 function failedAssistantMessage(threadId: string, requestId: string, error: unknown): MemoThreadMessage {
   const now = new Date().toISOString();
   return { id: `local-failed:${requestId}`, thread_id: threadId, role: "assistant", content: error instanceof Error ? error.message : String(error), status: "failed", request_id: requestId, duration_ms: null, artifacts: [], sources: [], used_context: [], created_at: now, updated_at: now };
-}
-
-function phaseLabel(phase: ConversationRunPhase, t: ReturnType<typeof useI18n>["t"]) {
-  const keys = {
-    queued: "home.phaseQueued",
-    resolving_subject: "home.phaseResolvingSubject",
-    loading_context: "home.phaseLoadingContext",
-    researching: "home.phaseResearching",
-    generating: "home.phaseGenerating",
-    extracting_actions: "home.phaseExtractingActions",
-    persisting: "home.phasePersisting"
-  } as const;
-  return t(keys[phase as keyof typeof keys] ?? "home.backendRunning");
 }
 
 function subjectLabelFor(kind: string, t: ReturnType<typeof useI18n>["t"]) {

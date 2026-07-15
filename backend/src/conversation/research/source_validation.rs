@@ -10,6 +10,8 @@ use scraper::{Html, Selector};
 
 use crate::ai::ConversationResearchSource;
 
+const MAX_STORED_SOURCE_SNIPPET_CHARS: usize = 8_000;
+
 pub(super) fn normalize_sources(
     sources: Vec<ConversationResearchSource>,
 ) -> Vec<ConversationResearchSource> {
@@ -54,11 +56,19 @@ fn normalize_sources_with_company(
             source.source_tier = tier.as_str().to_string();
             source.title = source.title.trim().to_string();
             source.url = canonical;
-            source.snippet = source.snippet.trim().to_string();
+            source.snippet = truncate_chars(source.snippet.trim(), MAX_STORED_SOURCE_SNIPPET_CHARS);
             Some(source)
         })
         .take(9)
         .collect()
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    let mut result = value.chars().take(limit).collect::<String>();
+    if value.chars().count() > limit {
+        result.push_str("...");
+    }
+    result
 }
 
 pub(super) async fn verify_source_urls(
@@ -525,6 +535,14 @@ mod tests {
         ]);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].source_tier, "community");
+
+        let bounded = normalize_sources(vec![ConversationResearchSource {
+            source_tier: "secondary".to_string(),
+            title: "Long source".to_string(),
+            url: "https://example.com/long".to_string(),
+            snippet: "x".repeat(20_000),
+        }]);
+        assert!(bounded[0].snippet.chars().count() <= 8_003);
 
         let local_address = normalize_sources(vec![ConversationResearchSource {
             source_tier: "secondary".to_string(),

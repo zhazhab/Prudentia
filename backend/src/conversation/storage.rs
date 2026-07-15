@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -14,12 +14,16 @@ use super::{
     company::load_company_view,
     types::{
         ConversationAction, ConversationRun, ConversationThreadDetail, ConversationThreadSummary,
-        RunEvent, StartRunRequest, ThreadSubject,
+        PersistedResearchSource, RunEvent, StartRunRequest, ThreadSubject, ThreadSubjectKind,
     },
 };
 
 mod rows;
+mod run_routing;
+#[cfg(test)]
+mod tests;
 use rows::{action_from_row, event_from_row, run_from_row, subject_from_row};
+pub use run_routing::{run_has_attachments, set_run_model_route, set_run_task_assessment};
 
 pub async fn create_run(
     pool: &SqlitePool,
@@ -139,6 +143,11 @@ pub async fn create_run(
         status: "queued".to_string(),
         phase: "queued".to_string(),
         provider: None,
+        task_complexity: None,
+        model: None,
+        route_reason: None,
+        activity: None,
+        source_count: None,
         error_code: None,
         error_message: None,
         started_at: now.clone(),
@@ -235,14 +244,19 @@ pub async fn set_run_phase(
     run_id: &str,
     phase: &str,
     provider: Option<&str>,
+    activity: Option<&str>,
+    source_count: Option<i64>,
 ) -> AppResult<()> {
     sqlx::query(
         r#"UPDATE conversation_runs SET status = 'running', phase = ?,
-                  provider = COALESCE(?, provider), updated_at = ?
+                  provider = COALESCE(?, provider), activity = COALESCE(?, activity),
+                  source_count = COALESCE(?, source_count), updated_at = ?
         WHERE id = ? AND status IN ('queued', 'running')"#,
     )
     .bind(phase)
     .bind(provider)
+    .bind(activity)
+    .bind(source_count)
     .bind(now_iso())
     .bind(run_id)
     .execute(pool)
@@ -257,11 +271,13 @@ pub async fn finish_run(
     phase: &str,
     error_code: Option<&str>,
     error_message: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let now = now_iso();
-    sqlx::query(
+    let mut transaction = pool.begin().await?;
+    let result = sqlx::query(
         r#"UPDATE conversation_runs SET status = ?, phase = ?, error_code = ?,
-                  error_message = ?, updated_at = ?, finished_at = ? WHERE id = ?"#,
+                  error_message = ?, updated_at = ?, finished_at = ?
+        WHERE id = ? AND status IN ('queued', 'running')"#,
     )
     .bind(status)
     .bind(phase)
@@ -270,9 +286,20 @@ pub async fn finish_run(
     .bind(&now)
     .bind(&now)
     .bind(run_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
-    Ok(())
+    if result.rows_affected() == 0 {
+        transaction.commit().await?;
+        return Ok(false);
+    }
+    sqlx::query(
+        "DELETE FROM conversation_run_events WHERE run_id = ? AND event_type = 'message.delta'",
+    )
+    .bind(run_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
 }
 
 pub async fn append_assistant_delta(
@@ -398,7 +425,7 @@ pub async fn thread_detail(
         active_run: active_run_for_thread(pool, thread_id).await?,
         thread: detail.thread,
     };
-    let company_view = if summary.subject.kind == "company" {
+    let company_view = if summary.subject.kind_type() == ThreadSubjectKind::Company {
         match summary.subject.subject_key.as_deref() {
             Some(symbol) => load_company_view(pool, symbol).await?,
             None => None,
@@ -441,7 +468,7 @@ pub async fn update_thread_subject(
     if result.rows_affected() == 0 {
         return Err(AppError::not_found("conversation thread not found"));
     }
-    if subject.kind == "company" {
+    if subject.kind_type() == ThreadSubjectKind::Company {
         sqlx::query("UPDATE memo_threads SET linked_symbols_json = ?, updated_at = ? WHERE id = ?")
             .bind(serde_json::to_string(
                 &subject.subject_key.iter().collect::<Vec<_>>(),
@@ -468,27 +495,39 @@ pub async fn insert_turn_summary(
     pool: &SqlitePool,
     run_id: &str,
     thread_id: &str,
+    subject: &ThreadSubject,
     summary: &str,
 ) -> AppResult<()> {
     sqlx::query(
         r#"INSERT OR REPLACE INTO conversation_turn_summaries (
-            id, run_id, thread_id, summary, created_at
-        ) VALUES (COALESCE((SELECT id FROM conversation_turn_summaries WHERE run_id = ?), ?), ?, ?, ?, ?)"#,
+            id, run_id, thread_id, subject_kind, subject_key, summary, created_at
+        ) VALUES (COALESCE((SELECT id FROM conversation_turn_summaries WHERE run_id = ?), ?),
+                  ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(run_id)
     .bind(Uuid::new_v4().to_string())
     .bind(run_id)
     .bind(thread_id)
+    .bind(&subject.kind)
+    .bind(&subject.subject_key)
     .bind(summary)
     .bind(now_iso())
     .execute(pool)
     .await?;
-    sqlx::query("UPDATE memo_threads SET summary = ?, updated_at = ? WHERE id = ?")
-        .bind(summary)
-        .bind(now_iso())
-        .bind(thread_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        r#"UPDATE memo_threads SET summary = ?, updated_at = ? WHERE id = ?
+        AND EXISTS (SELECT 1 FROM conversation_thread_subjects
+                    WHERE thread_id = ? AND kind = ?
+                      AND COALESCE(subject_key, '') = COALESCE(?, ''))"#,
+    )
+    .bind(summary)
+    .bind(now_iso())
+    .bind(thread_id)
+    .bind(thread_id)
+    .bind(&subject.kind)
+    .bind(&subject.subject_key)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -496,7 +535,7 @@ pub async fn insert_source(
     pool: &SqlitePool,
     run_id: &str,
     source: &crate::ai::ConversationResearchSource,
-) -> AppResult<Value> {
+) -> AppResult<PersistedResearchSource> {
     let id = Uuid::new_v4().to_string();
     let retrieved_at = now_iso();
     sqlx::query(
@@ -513,14 +552,14 @@ pub async fn insert_source(
     .bind(&retrieved_at)
     .execute(pool)
     .await?;
-    Ok(json!({
-        "id": id,
-        "title": source.title,
-        "url": source.url,
-        "snippet": source.snippet,
-        "source_tier": source.source_tier,
-        "retrieved_at": retrieved_at
-    }))
+    Ok(PersistedResearchSource {
+        id,
+        title: source.title.clone(),
+        url: source.url.clone(),
+        snippet: source.snippet.clone(),
+        source_tier: source.source_tier.clone(),
+        retrieved_at,
+    })
 }
 
 pub async fn insert_action(
@@ -531,9 +570,11 @@ pub async fn insert_action(
     target_version: Option<i64>,
 ) -> AppResult<ConversationAction> {
     let now = now_iso();
+    let assistant_message_id = run_by_id(pool, run_id).await?.assistant_message_id;
     let action = ConversationAction {
         id: Uuid::new_v4().to_string(),
         run_id: run_id.to_string(),
+        assistant_message_id,
         thread_id: thread_id.to_string(),
         action_type: draft.action_type,
         title: draft.title,
@@ -711,24 +752,21 @@ async fn run_by_client_request(
 
 fn run_select(suffix: &str) -> String {
     format!(
-        "SELECT id, client_request_id, thread_id, user_message_id, assistant_message_id, retry_of_run_id, status, phase, provider, error_code, error_message, started_at, updated_at, finished_at FROM conversation_runs {suffix}"
+        "SELECT id, client_request_id, thread_id, user_message_id, assistant_message_id, retry_of_run_id, status, phase, provider, task_complexity, model, route_reason, activity, source_count, error_code, error_message, started_at, updated_at, finished_at FROM conversation_runs {suffix}"
     )
 }
 
 fn action_select(suffix: &str) -> String {
     format!(
-        "SELECT id, run_id, thread_id, action_type, title, rationale, payload_json, result_json, target_version, status, error, created_at, updated_at, executed_at FROM conversation_actions {suffix}"
+        "SELECT id, run_id, (SELECT assistant_message_id FROM conversation_runs WHERE conversation_runs.id = conversation_actions.run_id) AS assistant_message_id, thread_id, action_type, title, rationale, payload_json, result_json, target_version, status, error, created_at, updated_at, executed_at FROM conversation_actions {suffix}"
     )
 }
 
 fn validate_subject(subject: &ThreadSubject) -> AppResult<()> {
-    if !matches!(
-        subject.kind.as_str(),
-        "company" | "investment_system" | "psychology" | "general"
-    ) {
+    if subject.kind_type() == ThreadSubjectKind::Unknown {
         return Err(AppError::bad_request("invalid conversation subject kind"));
     }
-    if subject.kind == "company"
+    if subject.kind_type() == ThreadSubjectKind::Company
         && subject
             .subject_key
             .as_deref()

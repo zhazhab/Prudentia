@@ -226,7 +226,7 @@ fn render_markdown(
     content: &CompanyViewSections,
 ) -> String {
     format!(
-        "# {company_name} ({symbol})\n\nVersion: {version}\n\n## Business Quality\n{}\n\n## Moat\n{}\n\n## Financials\n{}\n\n## Valuation Expectations\n{}\n\n## Thesis\n{}\n\n## Risks\n{}\n\n## Catalysts\n{}\n\n## Disconfirming Evidence\n{}\n\n## Open Questions\n{}\n",
+        "# {company_name} ({symbol})\n\nVersion: {version}\n\n## Business Model, Competition, and Profit Quality\n{}\n\n## Moat\n{}\n\n## Financials\n{}\n\n## Valuation Expectations\n{}\n\n## Thesis\n{}\n\n## Risks\n{}\n\n## Catalysts\n{}\n\n## Disconfirming Evidence\n{}\n\n## Open Questions\n{}\n",
         content.business_quality,
         content.moat,
         content.financials,
@@ -333,6 +333,9 @@ mod tests {
 
         assert_eq!(view.current_version, 1);
         assert!(workspace.path().join(&view.markdown_path).exists());
+        let markdown = fs::read_to_string(workspace.path().join(&view.markdown_path))
+            .expect("company view markdown");
+        assert!(markdown.contains("## Business Model, Competition, and Profit Quality"));
         assert_eq!(
             load_company_view(&pool, "0700.HK")
                 .await

@@ -29,6 +29,7 @@ export function ConversationActionCard({
   const [draft, setDraft] = useState(() => JSON.stringify(action.payload, null, 2));
   const [error, setError] = useState<string | null>(null);
   const pending = ["proposed", "edited", "failed"].includes(action.status);
+  const compact = ["executed", "rejected"].includes(action.status);
 
   useEffect(() => {
     setDraft(JSON.stringify(action.payload, null, 2));
@@ -46,63 +47,67 @@ export function ConversationActionCard({
   }
 
   return (
-    <article className={`conversation-action-card ${action.status}`}>
+    <article className={`conversation-action-card ${action.status}${compact ? " compact" : ""}`}>
       <header>
         <div>
-          <span>{actionTypeLabel(action.action_type)}</span>
+          <span>{actionTypeLabel(action.action_type, t)}</span>
           <h3>{action.title}</h3>
         </div>
         <ActionStatus action={action} />
       </header>
-      <p>{action.rationale}</p>
-      {editing ? (
-        <textarea
-          className="action-json-editor"
-          value={draft}
-          rows={12}
-          aria-label={t("home.actionPayload")}
-          onChange={(event) => setDraft(event.target.value)}
-        />
-      ) : (
-        <ActionPreview action={action} companyView={companyView} positions={positions} />
-      )}
-      {error || action.error ? (
-        <div className="action-error">
-          <AlertCircle size={14} />
-          <span>{error ?? action.error}</span>
-        </div>
-      ) : null}
-      {pending ? (
-        <div className="action-controls">
-          <button
-            type="button"
-            onClick={() => (editing ? void save() : setEditing(true))}
-            disabled={busy}
-            title={editing ? t("home.actionSaveEdit") : t("home.actionEdit")}
-            aria-label={editing ? t("home.actionSaveEdit") : t("home.actionEdit")}
-          >
-            {editing ? <Save size={16} /> : <Pencil size={16} />}
-          </button>
-          <button
-            type="button"
-            className="confirm"
-            onClick={() => void onConfirm()}
-            disabled={busy || editing}
-            title={t("home.actionConfirm")}
-            aria-label={t("home.actionConfirm")}
-          >
-            <Check size={17} />
-          </button>
-          <button
-            type="button"
-            onClick={() => void onReject()}
-            disabled={busy}
-            title={t("home.actionReject")}
-            aria-label={t("home.actionReject")}
-          >
-            <X size={17} />
-          </button>
-        </div>
+      {!compact ? (
+        <>
+          <p>{action.rationale}</p>
+          {editing ? (
+            <textarea
+              className="action-json-editor"
+              value={draft}
+              rows={12}
+              aria-label={t("home.actionPayload")}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+          ) : (
+            <ActionPreview action={action} companyView={companyView} positions={positions} />
+          )}
+          {error || action.error ? (
+            <div className="action-error">
+              <AlertCircle size={14} />
+              <span>{error ?? action.error}</span>
+            </div>
+          ) : null}
+          {pending ? (
+            <div className="action-controls">
+              <button
+                type="button"
+                onClick={() => (editing ? void save() : setEditing(true))}
+                disabled={busy}
+                title={editing ? t("home.actionSaveEdit") : t("home.actionEdit")}
+                aria-label={editing ? t("home.actionSaveEdit") : t("home.actionEdit")}
+              >
+                {editing ? <Save size={16} /> : <Pencil size={16} />}
+              </button>
+              <button
+                type="button"
+                className="confirm"
+                onClick={() => void onConfirm()}
+                disabled={busy || editing}
+                title={t("home.actionConfirm")}
+                aria-label={t("home.actionConfirm")}
+              >
+                <Check size={17} />
+              </button>
+              <button
+                type="button"
+                onClick={() => void onReject()}
+                disabled={busy}
+                title={t("home.actionReject")}
+                aria-label={t("home.actionReject")}
+              >
+                <X size={17} />
+              </button>
+            </div>
+          ) : null}
+        </>
       ) : null}
     </article>
   );
@@ -280,9 +285,9 @@ function ActionStatus({ action }: { action: ConversationAction }) {
   return label ? <span className={`action-status ${action.status}`}>{label}</span> : null;
 }
 
-function actionTypeLabel(value: string) {
-  if (value === "company_view_patch") return "Company view";
-  if (value === "trade_record") return "Trade";
-  if (value === "rule_graph_patch") return "Rule graph";
+function actionTypeLabel(value: string, t: ReturnType<typeof useI18n>["t"]) {
+  if (value === "company_view_patch") return t("home.actionCompanyView");
+  if (value === "trade_record") return t("home.actionTrade");
+  if (value === "rule_graph_patch") return t("home.actionRuleGraph");
   return value;
 }

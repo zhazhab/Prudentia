@@ -11,6 +11,27 @@ pub struct ThreadSubject {
     pub confidence: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadSubjectKind {
+    Company,
+    InvestmentSystem,
+    Psychology,
+    General,
+    Unknown,
+}
+
+impl ThreadSubject {
+    pub fn kind_type(&self) -> ThreadSubjectKind {
+        match self.kind.as_str() {
+            "company" => ThreadSubjectKind::Company,
+            "investment_system" => ThreadSubjectKind::InvestmentSystem,
+            "psychology" => ThreadSubjectKind::Psychology,
+            "general" => ThreadSubjectKind::General,
+            _ => ThreadSubjectKind::Unknown,
+        }
+    }
+}
+
 impl Default for ThreadSubject {
     fn default() -> Self {
         Self {
@@ -33,6 +54,11 @@ pub struct ConversationRun {
     pub status: String,
     pub phase: String,
     pub provider: Option<String>,
+    pub task_complexity: Option<String>,
+    pub model: Option<String>,
+    pub route_reason: Option<String>,
+    pub activity: Option<String>,
+    pub source_count: Option<i64>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub started_at: String,
@@ -50,10 +76,21 @@ pub struct RunEvent {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersistedResearchSource {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    pub source_tier: String,
+    pub retrieved_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationAction {
     pub id: String,
     pub run_id: String,
+    pub assistant_message_id: Option<String>,
     pub thread_id: String,
     pub action_type: String,
     pub title: String,
