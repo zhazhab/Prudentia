@@ -381,13 +381,14 @@ pub async fn mark_assistant_terminal(
 }
 
 pub async fn run_by_id(pool: &SqlitePool, run_id: &str) -> AppResult<ConversationRun> {
-    sqlx::query(&run_select("WHERE id = ?"))
+    let run = sqlx::query(&run_select("WHERE id = ?"))
         .bind(run_id)
         .fetch_optional(pool)
         .await?
         .map(run_from_row)
         .transpose()?
-        .ok_or_else(|| AppError::not_found("conversation run not found"))
+        .ok_or_else(|| AppError::not_found("conversation run not found"))?;
+    hydrate_execution_plan(pool, run).await
 }
 
 pub async fn list_threads(pool: &SqlitePool) -> AppResult<Vec<ConversationThreadSummary>> {
@@ -704,26 +705,53 @@ async fn latest_run_for_thread(
     pool: &SqlitePool,
     thread_id: &str,
 ) -> AppResult<Option<ConversationRun>> {
-    sqlx::query(&run_select(
+    let run = sqlx::query(&run_select(
         "WHERE thread_id = ? ORDER BY started_at DESC LIMIT 1",
     ))
     .bind(thread_id)
     .fetch_optional(pool)
     .await?
     .map(run_from_row)
-    .transpose()
+    .transpose()?;
+    match run {
+        Some(run) => Ok(Some(hydrate_execution_plan(pool, run).await?)),
+        None => Ok(None),
+    }
 }
 
 async fn run_by_client_request(
     pool: &SqlitePool,
     client_request_id: &str,
 ) -> AppResult<Option<ConversationRun>> {
-    sqlx::query(&run_select("WHERE client_request_id = ?"))
+    let run = sqlx::query(&run_select("WHERE client_request_id = ?"))
         .bind(client_request_id)
         .fetch_optional(pool)
         .await?
         .map(run_from_row)
-        .transpose()
+        .transpose()?;
+    match run {
+        Some(run) => Ok(Some(hydrate_execution_plan(pool, run).await?)),
+        None => Ok(None),
+    }
+}
+
+async fn hydrate_execution_plan(
+    pool: &SqlitePool,
+    mut run: ConversationRun,
+) -> AppResult<ConversationRun> {
+    run.execution_plan = execution_plan_for_run(pool, &run.id).await?;
+    if matches!(run.status.as_str(), "failed" | "canceled" | "interrupted") {
+        if let Some(plan) = &mut run.execution_plan {
+            for step in &mut plan.steps {
+                step.status = match step.status.as_str() {
+                    "running" => "failed".to_string(),
+                    "pending" => "skipped".to_string(),
+                    _ => step.status.clone(),
+                };
+            }
+        }
+    }
+    Ok(run)
 }
 
 fn run_select(suffix: &str) -> String {

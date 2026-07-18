@@ -172,6 +172,20 @@ async fn active_runs_restore_unfinished_capability_calls() {
     assert!(active_runs(&pool).await.expect("reload active runs")[0]
         .active_capabilities
         .is_empty());
+
+    assert!(
+        finish_run(&pool, &run.id, "canceled", "canceled", None, None)
+            .await
+            .expect("finish run")
+    );
+    let detail = thread_detail(&pool, &thread_id, 20, None)
+        .await
+        .expect("reload terminal thread");
+    let plan = detail
+        .latest_run
+        .and_then(|run| run.execution_plan)
+        .expect("terminal run plan");
+    assert_eq!(plan.steps[1].status, "failed");
 }
 
 #[tokio::test]
