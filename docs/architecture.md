@@ -34,7 +34,7 @@ Prudentia 是一个本地优先的 monorepo：
 
 本地 `.env`、默认 SQLite、附件原件、公司 Markdown 投影和自定义 Capability 清单默认从 Git common dir 所在的原仓库工作目录读取，用于让不同 git worktree 读写同一份配置、投资数据和个人分析方法。`PRUDENTIA_LOCAL_DIR` 可以覆盖该目录；相对 SQLite URL 会相对这个本地状态目录解析。附件与公司投影位于 `data/workspace`，能力清单位于 `capabilities/`，数据库只保存附件和投影的相对路径。
 
-SQLite 是第一版持久化层。v1 不包含登录、多用户授权或券商 API 同步。Portfolio quantity 和 average cost 来自导入或手动更新；自动更新只刷新价格和派生值。消息、来源、确认动作、公司版本、交易、规则图和组合快照作为投资事实长期保留。运行中的 `message.delta` 只为断线恢复保留，在终态完整消息落库后删除；研究缓存超过 24 小时后由后续检索清理。SQLite 释放的页留给后续写入复用，不在每轮对话执行 `VACUUM`，避免无收益的全库重写和磁盘抖动。
+SQLite 是第一版持久化层。v1 不包含登录、多用户授权或券商 API 同步。Portfolio quantity 和 average cost 来自导入或手动更新；自动更新只刷新价格和派生值。消息、来源、确认动作、公司版本、交易、规则图和组合快照作为投资事实长期保留。运行中的 `message.delta` 只为断线恢复保留，在终态完整消息落库后删除；研究缓存超过 24 小时后由后续检索清理。创建对话运行使用 `BEGIN IMMEDIATE` 在读取线程状态前取得写保留锁，避免证券目录刷新等后台写入与延迟事务发生不可等待的读写升级冲突。SQLite 释放的页留给后续写入复用，不在每轮对话执行 `VACUUM`，避免无收益的全库重写和磁盘抖动。
 
 Portfolio Performance 使用组合市值快照模型和系统自动记录的交易调整。导入确认、草稿确认、持仓编辑和持仓删除导致 CNY 组合市值变化时，会在 `portfolio_cash_flows` 写入 `buy` 或 `sell` 调整；每日行情刷新只写快照，不产生交易调整。组合收益率按每个快照区间 `(期末市值 - 区间净交易调整) / 期初市值 - 1` 连乘得到时间加权收益率，同时保留未调整交易变动的快照收益率用于解释。删除到空仓会成为后续收益读取的新起点，避免数据清理后重新导入被误计为收益。持仓表的周期收益率复用同一个 `本月` / `本年` / `记录起` 周期，按单只持仓快照的 CNY 市值变化计算。标普 ETF 代理、恒生 ETF 代理和官方上证综指快照只跟随持仓价格刷新周期写入，用于同周期收益率对比。持仓浮盈亏按券商持仓页常见口径计算：本币市值为 `last_price × quantity`，本币浮盈亏为 `(last_price - average_cost) × quantity`，当前收益率为 `unrealized_pnl / (average_cost × quantity)`，CNY 汇总再按 FX 转换。
 

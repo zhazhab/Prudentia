@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use sqlx::sqlite::SqlitePoolOptions;
 
 use crate::{
@@ -10,6 +12,40 @@ use super::{
     active_runs, append_event, complete_assistant_message, create_run, finish_run, insert_action,
     insert_source, thread_detail, StartRunRequest,
 };
+
+#[tokio::test]
+async fn create_run_waits_for_a_concurrent_sqlite_writer() {
+    let database_file = tempfile::NamedTempFile::new().expect("create sqlite file");
+    let database_url = format!("sqlite://{}", database_file.path().display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("connect sqlite");
+    database::migrate(&pool).await.expect("migrate");
+
+    let writer = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("reserve concurrent writer");
+    let release_writer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        writer.commit().await.expect("release concurrent writer");
+    });
+    let request = StartRunRequest {
+        client_request_id: "concurrent-writer-run".to_string(),
+        thread_id: None,
+        client_thread_id: Some("concurrent-writer-thread".to_string()),
+        content: "retry the company analysis".to_string(),
+        attachment_ids: Vec::new(),
+        locale: Some("en-US".to_string()),
+    };
+
+    let result = create_run(&pool, &request, Locale::En, None).await;
+    release_writer.await.expect("join writer release");
+
+    assert!(result.is_ok(), "run creation should wait for the writer");
+}
 
 #[tokio::test]
 async fn sources_are_deduplicated_by_url_within_one_run() {

@@ -48,7 +48,9 @@ pub async fn create_run(
     }
 
     let now = now_iso();
-    let mut transaction = pool.begin().await?;
+    // Reserve the SQLite writer before reading so a concurrent background refresh
+    // cannot force this transaction into an unresolvable read-to-write upgrade.
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let thread_id = if let Some(thread_id) = request
         .thread_id
         .as_deref()
