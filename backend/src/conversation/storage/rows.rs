@@ -25,6 +25,8 @@ pub(super) fn run_from_row(row: sqlx::sqlite::SqliteRow) -> AppResult<Conversati
         started_at: row.try_get("started_at")?,
         updated_at: row.try_get("updated_at")?,
         finished_at: row.try_get("finished_at")?,
+        active_capabilities: Vec::new(),
+        execution_plan: None,
     })
 }
 

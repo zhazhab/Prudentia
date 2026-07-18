@@ -39,6 +39,7 @@ data/symbol-directory/*
 !data/symbol-directory/public/
 data/symbol-directory/public/*
 !data/symbol-directory/public/symbols.json
+/capabilities/
 
 # Local planning and process docs
 .scratch/

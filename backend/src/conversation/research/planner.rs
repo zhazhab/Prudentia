@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::types::{ThreadSubject, ThreadSubjectKind};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum EvidenceCategory {
     Official,
@@ -36,13 +36,13 @@ impl EvidenceCategory {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct ResearchQuery {
     pub(super) category: EvidenceCategory,
     pub(super) text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResearchPlan {
     subject: CompanyResearchSubject,
     intent: CompanyResearchIntent,
@@ -101,7 +101,7 @@ impl ResearchPlan {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct CompanyResearchSubject {
     company_name: String,
     symbol: String,
@@ -124,7 +124,7 @@ struct SubjectCacheIdentity<'a> {
     annual_history_years: Option<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum CompanyResearchIntent {
     BusinessModel,
@@ -184,6 +184,64 @@ pub(in crate::conversation) fn plan_research(
         annual_history_years,
         queries,
     })
+}
+
+pub(in crate::conversation) fn is_community_insights_request(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    contains_any(
+        &normalized,
+        &[
+            "社区怎么看",
+            "社区看法",
+            "社区观点",
+            "社区看点",
+            "社区讨论",
+            "热门帖子",
+            "热门讨论",
+            "热帖",
+            "投资社区",
+            "投资者怎么看",
+            "投资者观点",
+            "投资者讨论",
+            "雪球怎么看",
+            "雪球观点",
+            "雪球讨论",
+            "股吧讨论",
+            "reddit",
+            "tradingview",
+            "community insights",
+            "community views",
+            "community discussion",
+            "community sentiment",
+            "investor discussion",
+            "popular posts",
+        ],
+    )
+}
+
+pub(in crate::conversation) fn plan_community_insights(
+    message: &str,
+    subject: &ThreadSubject,
+) -> Option<ResearchPlan> {
+    if !is_community_insights_request(message) {
+        return None;
+    }
+    plan_community_research(message, subject)
+}
+
+pub(in crate::conversation) fn plan_community_research(
+    message: &str,
+    subject: &ThreadSubject,
+) -> Option<ResearchPlan> {
+    let mut plan = plan_research(message, subject)?;
+    plan.annual_history_years = None;
+    plan.queries = research_queries(&plan.subject, plan.intent, None);
+    Some(plan)
+}
+
+pub(in crate::conversation) fn community_request_requires_company_research(message: &str) -> bool {
+    is_community_insights_request(message)
+        && classify_intent(message) != CompanyResearchIntent::General
 }
 
 fn classify_intent(message: &str) -> CompanyResearchIntent {
@@ -247,6 +305,18 @@ fn classify_intent(message: &str) -> CompanyResearchIntent {
         CompanyResearchIntent::Fundamentals
     } else {
         CompanyResearchIntent::General
+    }
+}
+
+pub(in crate::conversation) fn company_research_scope(message: &str) -> &'static str {
+    match classify_intent(message) {
+        CompanyResearchIntent::BusinessModel => "business_model",
+        CompanyResearchIntent::Moat => "moat",
+        CompanyResearchIntent::Earnings => "earnings",
+        CompanyResearchIntent::News => "news",
+        CompanyResearchIntent::Risk => "risk",
+        CompanyResearchIntent::Fundamentals => "fundamentals",
+        CompanyResearchIntent::General => "default",
     }
 }
 
@@ -355,7 +425,9 @@ fn contains_any(value: &str, candidates: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{plan_research, EvidenceCategory};
+    use super::{
+        is_community_insights_request, plan_community_insights, plan_research, EvidenceCategory,
+    };
     use crate::conversation::types::ThreadSubject;
 
     fn company_subject(symbol: &str, name: &str) -> ThreadSubject {
@@ -395,6 +467,33 @@ mod tests {
         assert!(plan_research("你好", &company).is_none());
         assert!(plan_research("只根据已经沉淀的公司看法回答，不增加新事实。", &company).is_none());
         assert!(plan_research("分析一下我的持仓", &ThreadSubject::default()).is_none());
+    }
+
+    #[test]
+    fn community_insight_requests_are_explicit_and_do_not_match_general_analysis() {
+        for message in [
+            "看看腾讯最近的社区观点",
+            "整理腾讯的社区看点和热帖",
+            "雪球怎么看拼多多？",
+            "Find popular Reddit investor discussions about Micron",
+        ] {
+            assert!(is_community_insights_request(message), "{message}");
+        }
+        for message in ["分析腾讯", "腾讯的商业模式是什么？", "查看腾讯最新财报"]
+        {
+            assert!(!is_community_insights_request(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn community_insight_plan_does_not_inherit_default_financial_history() {
+        let plan =
+            plan_community_insights("社区怎么看 PDD？", &company_subject("PDD", "PDD Holdings"))
+                .expect("community plan");
+
+        assert_eq!(plan.annual_history_years(), None);
+        assert!(!plan.queries()[2].text.contains("last 5 annual reports"));
+        assert!(plan.queries()[2].text.contains("site:xueqiu.com"));
     }
 
     #[test]

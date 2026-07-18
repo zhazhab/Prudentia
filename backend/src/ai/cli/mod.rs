@@ -24,15 +24,17 @@ use usage::log_cli_token_usage;
 use crate::{
     ai::{
         prompt::{
+            agent_decision_schema, agent_execution_prompt, capability_execution_prompt,
             conversation_projection_cli_prompt, conversation_projection_schema,
             conversation_response_prompt, investment_system_refinement_prompt, memo_chat_prompt,
             memo_extraction_prompt, parse_json_object, portfolio_image_recognition_prompt,
             portfolio_image_recognition_schema, portfolio_review_prompt,
             research_distillation_prompt, stock_snapshot_prompt,
         },
-        AiError, AiProvider, AiProviderEvent, ConversationContext, ConversationProjection,
-        InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioImageRecognition,
-        PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
+        AgentModelRequest, AiError, AiProvider, AiProviderEvent, CapabilityModelRequest,
+        ConversationContext, ConversationProjection, InvestmentSystemRefinement, MemoChatContext,
+        MemoExtraction, PortfolioImageRecognition, PortfolioReviewContext, ResearchAnalysis,
+        ResearchSourceInput, StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
     locale::Locale,
@@ -177,6 +179,28 @@ impl<B> AiProvider for CliAiProvider<B>
 where
     B: CliBackend,
 {
+    async fn execute_capability(
+        &self,
+        request: &CapabilityModelRequest,
+        locale: Locale,
+    ) -> Result<serde_json::Value, AiError> {
+        let schema = serde_json::to_string(&request.output_schema)
+            .map_err(|error| AiError::Provider(error.to_string()))?;
+        self.run_json_with_schema(capability_execution_prompt(request, locale), &schema)
+            .await
+    }
+
+    async fn execute_agent_turn(
+        &self,
+        request: &AgentModelRequest,
+        locale: Locale,
+    ) -> Result<serde_json::Value, AiError> {
+        let schema = serde_json::to_string(&agent_decision_schema(request))
+            .map_err(|error| AiError::Provider(error.to_string()))?;
+        self.run_json_with_schema(agent_execution_prompt(request, locale), &schema)
+            .await
+    }
+
     async fn respond_to_conversation(
         &self,
         context: &ConversationContext,

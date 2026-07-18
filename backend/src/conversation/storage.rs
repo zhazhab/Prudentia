@@ -14,16 +14,21 @@ use super::{
     company::load_company_view,
     types::{
         ConversationAction, ConversationRun, ConversationThreadDetail, ConversationThreadSummary,
-        PersistedResearchSource, RunEvent, StartRunRequest, ThreadSubject, ThreadSubjectKind,
+        RunEvent, StartRunRequest, ThreadSubject, ThreadSubjectKind,
     },
 };
 
+mod active_runs;
 mod rows;
 mod run_routing;
+mod sources;
 #[cfg(test)]
 mod tests;
+pub use active_runs::active_runs;
+use active_runs::{active_capabilities_for_run, execution_plan_for_run};
 use rows::{action_from_row, event_from_row, run_from_row, subject_from_row};
 pub use run_routing::{run_has_attachments, set_run_model_route, set_run_task_assessment};
+pub(in crate::conversation) use sources::insert_source;
 
 pub async fn create_run(
     pool: &SqlitePool,
@@ -43,7 +48,9 @@ pub async fn create_run(
     }
 
     let now = now_iso();
-    let mut transaction = pool.begin().await?;
+    // Reserve the SQLite writer before reading so a concurrent background refresh
+    // cannot force this transaction into an unresolvable read-to-write upgrade.
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let thread_id = if let Some(thread_id) = request
         .thread_id
         .as_deref()
@@ -153,6 +160,8 @@ pub async fn create_run(
         started_at: now.clone(),
         updated_at: now.clone(),
         finished_at: None,
+        active_capabilities: Vec::new(),
+        execution_plan: None,
     };
     sqlx::query(
         r#"INSERT INTO conversation_runs (
@@ -323,6 +332,7 @@ pub async fn complete_assistant_message(
     pool: &SqlitePool,
     run_id: &str,
     content: &str,
+    artifacts: &[Value],
     sources: &[Value],
     used_context: &[Value],
 ) -> AppResult<String> {
@@ -335,10 +345,11 @@ pub async fn complete_assistant_message(
         .ok();
     sqlx::query(
         r#"UPDATE memo_thread_messages SET content = ?, status = 'completed', duration_ms = ?,
-                  sources_json = ?, used_context_json = ?, updated_at = ? WHERE id = ?"#,
+                  artifacts_json = ?, sources_json = ?, used_context_json = ?, updated_at = ? WHERE id = ?"#,
     )
     .bind(content)
     .bind(duration)
+    .bind(serde_json::to_string(artifacts)?)
     .bind(serde_json::to_string(sources)?)
     .bind(serde_json::to_string(used_context)?)
     .bind(now_iso())
@@ -370,22 +381,14 @@ pub async fn mark_assistant_terminal(
 }
 
 pub async fn run_by_id(pool: &SqlitePool, run_id: &str) -> AppResult<ConversationRun> {
-    sqlx::query(&run_select("WHERE id = ?"))
+    let run = sqlx::query(&run_select("WHERE id = ?"))
         .bind(run_id)
         .fetch_optional(pool)
         .await?
         .map(run_from_row)
         .transpose()?
-        .ok_or_else(|| AppError::not_found("conversation run not found"))
-}
-
-pub async fn active_runs(pool: &SqlitePool) -> AppResult<Vec<ConversationRun>> {
-    let rows = sqlx::query(&run_select(
-        "WHERE status IN ('queued', 'running') ORDER BY started_at ASC",
-    ))
-    .fetch_all(pool)
-    .await?;
-    rows.into_iter().map(run_from_row).collect()
+        .ok_or_else(|| AppError::not_found("conversation run not found"))?;
+    hydrate_execution_plan(pool, run).await
 }
 
 pub async fn list_threads(pool: &SqlitePool) -> AppResult<Vec<ConversationThreadSummary>> {
@@ -529,37 +532,6 @@ pub async fn insert_turn_summary(
     .execute(pool)
     .await?;
     Ok(())
-}
-
-pub async fn insert_source(
-    pool: &SqlitePool,
-    run_id: &str,
-    source: &crate::ai::ConversationResearchSource,
-) -> AppResult<PersistedResearchSource> {
-    let id = Uuid::new_v4().to_string();
-    let retrieved_at = now_iso();
-    sqlx::query(
-        r#"INSERT INTO conversation_sources (
-            id, run_id, title, url, snippet, source_tier, retrieved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)"#,
-    )
-    .bind(&id)
-    .bind(run_id)
-    .bind(&source.title)
-    .bind(&source.url)
-    .bind(&source.snippet)
-    .bind(&source.source_tier)
-    .bind(&retrieved_at)
-    .execute(pool)
-    .await?;
-    Ok(PersistedResearchSource {
-        id,
-        title: source.title.clone(),
-        url: source.url.clone(),
-        snippet: source.snippet.clone(),
-        source_tier: source.source_tier.clone(),
-        retrieved_at,
-    })
 }
 
 pub async fn insert_action(
@@ -714,40 +686,72 @@ async fn active_run_for_thread(
     pool: &SqlitePool,
     thread_id: &str,
 ) -> AppResult<Option<ConversationRun>> {
-    sqlx::query(&run_select(
+    let mut run = sqlx::query(&run_select(
         "WHERE thread_id = ? AND status IN ('queued', 'running') ORDER BY started_at DESC LIMIT 1",
     ))
     .bind(thread_id)
     .fetch_optional(pool)
     .await?
     .map(run_from_row)
-    .transpose()
+    .transpose()?;
+    if let Some(run) = &mut run {
+        run.active_capabilities = active_capabilities_for_run(pool, &run.id).await?;
+        run.execution_plan = execution_plan_for_run(pool, &run.id).await?;
+    }
+    Ok(run)
 }
 
 async fn latest_run_for_thread(
     pool: &SqlitePool,
     thread_id: &str,
 ) -> AppResult<Option<ConversationRun>> {
-    sqlx::query(&run_select(
+    let run = sqlx::query(&run_select(
         "WHERE thread_id = ? ORDER BY started_at DESC LIMIT 1",
     ))
     .bind(thread_id)
     .fetch_optional(pool)
     .await?
     .map(run_from_row)
-    .transpose()
+    .transpose()?;
+    match run {
+        Some(run) => Ok(Some(hydrate_execution_plan(pool, run).await?)),
+        None => Ok(None),
+    }
 }
 
 async fn run_by_client_request(
     pool: &SqlitePool,
     client_request_id: &str,
 ) -> AppResult<Option<ConversationRun>> {
-    sqlx::query(&run_select("WHERE client_request_id = ?"))
+    let run = sqlx::query(&run_select("WHERE client_request_id = ?"))
         .bind(client_request_id)
         .fetch_optional(pool)
         .await?
         .map(run_from_row)
-        .transpose()
+        .transpose()?;
+    match run {
+        Some(run) => Ok(Some(hydrate_execution_plan(pool, run).await?)),
+        None => Ok(None),
+    }
+}
+
+async fn hydrate_execution_plan(
+    pool: &SqlitePool,
+    mut run: ConversationRun,
+) -> AppResult<ConversationRun> {
+    run.execution_plan = execution_plan_for_run(pool, &run.id).await?;
+    if matches!(run.status.as_str(), "failed" | "canceled" | "interrupted") {
+        if let Some(plan) = &mut run.execution_plan {
+            for step in &mut plan.steps {
+                step.status = match step.status.as_str() {
+                    "running" => "failed".to_string(),
+                    "pending" => "skipped".to_string(),
+                    _ => step.status.clone(),
+                };
+            }
+        }
+    }
+    Ok(run)
 }
 
 fn run_select(suffix: &str) -> String {

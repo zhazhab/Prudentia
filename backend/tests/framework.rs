@@ -285,6 +285,186 @@ async fn conversation_run_persists_events_and_natural_assistant_message() {
 }
 
 #[tokio::test]
+async fn company_turn_persists_registered_skill_and_agent_artifacts() {
+    let pool = test_pool().await;
+    let local = tempfile::tempdir().expect("local state");
+    let mut config = AppConfig::from_env();
+    config.web_research_provider = WebResearchProviderKind::Disabled;
+    config.workspace_dir = local.path().join("workspace");
+    config.capability_dir = local.path().join("capabilities");
+    let app = startup::build_router_with_config(
+        pool.clone(),
+        Arc::new(mock_ai_runtime()),
+        Arc::new(MockMarketDataProvider),
+        &config,
+    );
+    let capability_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/conversation/capabilities")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("capability response");
+    assert_eq!(capability_response.status(), StatusCode::OK);
+    let capability_body = to_bytes(capability_response.into_body(), 1024 * 1024)
+        .await
+        .expect("capability body");
+    let capabilities: Vec<serde_json::Value> =
+        serde_json::from_slice(&capability_body).expect("capability json");
+    assert!(capabilities.iter().any(|capability| {
+        capability["id"] == "analyze_business_model" && capability["kind"] == "skill"
+    }));
+    assert!(capabilities.iter().any(|capability| {
+        capability["id"] == "challenge_company_thesis" && capability["kind"] == "agent"
+    }));
+    assert!(capabilities
+        .iter()
+        .all(|capability| capability.get("instructions").is_none()));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                      "client_request_id":"capability-seed",
+                      "client_thread_id":"capability-thread",
+                      "content":"你好",
+                      "locale":"zh-CN"
+                    }"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("seed response");
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("seed body");
+    let accepted: StartRunResponse = serde_json::from_slice(&body).expect("seed json");
+    let thread_id = accepted.thread.thread.id;
+    wait_for_conversation(&app, &thread_id).await;
+
+    let subject = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/conversation/threads/{thread_id}/subject"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"kind":"company","subject_key":"0700.HK","label":"腾讯控股"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("subject response");
+    assert_eq!(subject.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/conversation/runs")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{
+                      "client_request_id":"capability-analysis",
+                      "thread_id":"{thread_id}",
+                      "content":"详细分析腾讯的商业模式和护城河，并做反方分析",
+                      "locale":"zh-CN"
+                    }}"#,
+                )))
+                .expect("request"),
+        )
+        .await
+        .expect("analysis response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("analysis body");
+    let analysis_run: StartRunResponse = serde_json::from_slice(&body).expect("analysis json");
+    let detail = wait_for_conversation(&app, &thread_id).await;
+    let assistant = detail.messages.last().expect("assistant message");
+    let capability_ids = assistant
+        .artifacts
+        .iter()
+        .filter_map(|artifact| {
+            artifact
+                .get("capability_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        detail.latest_run.as_ref().map(|run| run.status.as_str()),
+        Some("completed")
+    );
+    assert_eq!(
+        capability_ids,
+        vec![
+            "analyze_business_model",
+            "audit_moat",
+            "challenge_company_thesis"
+        ]
+    );
+    assert!(assistant.artifacts.iter().all(|artifact| {
+        artifact
+            .get("manifest_hash")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+            && artifact
+                .get("payload")
+                .is_some_and(serde_json::Value::is_object)
+            && artifact.get("provider").and_then(serde_json::Value::as_str) == Some("mock")
+    }));
+    assert_eq!(
+        assistant
+            .artifacts
+            .iter()
+            .find(|artifact| artifact["capability_kind"] == "agent")
+            .and_then(|artifact| artifact["model_steps"].as_array())
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        assistant
+            .used_context
+            .iter()
+            .filter(|context| {
+                context.get("kind").and_then(serde_json::Value::as_str) == Some("capability")
+            })
+            .count(),
+        3
+    );
+
+    let tool_events = sqlx::query_as::<_, (String, String)>(
+        "SELECT event_type, payload_json FROM conversation_run_events WHERE run_id = ? AND event_type LIKE 'tool.%' ORDER BY event_id",
+    )
+    .bind(&analysis_run.run.id)
+    .fetch_all(&pool)
+    .await
+    .expect("tool events");
+    let started = tool_events
+        .iter()
+        .filter(|(event_type, _)| event_type == "tool.started")
+        .map(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).expect("event json"))
+        .collect::<Vec<_>>();
+    assert!(started.iter().any(|payload| {
+        payload["capability_kind"] == "skill" && payload["stage"] == "analysis"
+    }));
+    assert!(started.iter().any(|payload| {
+        payload["capability_kind"] == "agent" && payload["stage"] == "challenge"
+    }));
+}
+
+#[tokio::test]
 async fn ambiguous_company_turn_asks_for_confirmation_without_bound_company_context() {
     let pool = test_pool().await;
     sqlx::query(
@@ -423,6 +603,14 @@ async fn ambiguous_company_turn_asks_for_confirmation_without_bound_company_cont
             .await
             .expect("source count");
     assert_eq!(source_count, 0);
+    let clarification_plan_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM conversation_run_events WHERE run_id = ? AND event_type LIKE 'run.plan.%'",
+    )
+    .bind(&clarification_run.run.id)
+    .fetch_one(&pool)
+    .await
+    .expect("clarification plan count");
+    assert_eq!(clarification_plan_count, 0);
 
     let response = app
         .clone()
@@ -461,6 +649,34 @@ async fn ambiguous_company_turn_asks_for_confirmation_without_bound_company_cont
         run.error_code, run.error_message, run_events
     );
     assert_ne!(run.route_reason.as_deref(), Some("subject_clarification"));
+    assert!(run_events
+        .iter()
+        .any(|(event_type, _)| event_type == "run.plan.created"));
+    assert!(run_events.iter().any(|(event_type, payload)| {
+        event_type == "run.plan.step"
+            && serde_json::from_str::<serde_json::Value>(payload).is_ok_and(|payload| {
+                payload["step_id"] == "memo_update" && payload["status"] == "completed"
+            })
+    }));
+    assert!(
+        run_events
+            .iter()
+            .any(|(event_type, _)| event_type == "tool.started"),
+        "confirmed company research should enter the registered tool runtime"
+    );
+    assert!(
+        run_events
+            .iter()
+            .any(|(event_type, _)| event_type == "tool.failed"),
+        "disabled research should be recorded as a non-terminal tool failure"
+    );
+    let started_payload = run_events
+        .iter()
+        .find(|(event_type, _)| event_type == "tool.started")
+        .map(|(_, payload)| serde_json::from_str::<serde_json::Value>(payload).expect("tool event"))
+        .expect("tool started payload");
+    assert!(started_payload.get("arguments").is_none());
+    assert!(started_payload.get("result").is_none());
     assert!(assistant.used_context.iter().any(|context| {
         context.get("kind").and_then(serde_json::Value::as_str) == Some("company")
             && context.get("label").and_then(serde_json::Value::as_str) == Some("9988.HK")

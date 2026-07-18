@@ -5,9 +5,10 @@ use tokio::sync::mpsc;
 
 use crate::{
     ai::{
-        AiError, AiProvider, AiProviderEvent, ConversationContext, ConversationProjection,
-        InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioReviewContext,
-        ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
+        AgentModelRequest, AiError, AiProvider, AiProviderEvent, CapabilityModelRequest,
+        ConversationContext, ConversationProjection, InvestmentSystemRefinement, MemoChatContext,
+        MemoExtraction, PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput,
+        StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
     locale::Locale,
@@ -19,6 +20,39 @@ pub struct MockAiProvider;
 
 #[async_trait]
 impl AiProvider for MockAiProvider {
+    async fn execute_capability(
+        &self,
+        request: &CapabilityModelRequest,
+        _locale: Locale,
+    ) -> Result<serde_json::Value, AiError> {
+        Ok(mock_value_for_schema(&request.output_schema))
+    }
+
+    async fn execute_agent_turn(
+        &self,
+        request: &AgentModelRequest,
+        _locale: Locale,
+    ) -> Result<serde_json::Value, AiError> {
+        if request.observations.is_empty() {
+            if let Some(tool) = request.available_tools.first() {
+                return Ok(serde_json::json!({
+                    "action": "tool",
+                    "tool_id": tool.id,
+                    "tool_version": tool.version,
+                    "arguments": mock_value_for_schema(&tool.input_schema),
+                    "output": {}
+                }));
+            }
+        }
+        Ok(serde_json::json!({
+            "action": "final",
+            "tool_id": "",
+            "tool_version": 0,
+            "arguments": {},
+            "output": mock_value_for_schema(&request.final_output_schema)
+        }))
+    }
+
     async fn respond_to_conversation(
         &self,
         context: &ConversationContext,
@@ -268,6 +302,45 @@ impl AiProvider for MockAiProvider {
             }],
             warnings: vec!["Mock image recognition preview.".to_string()],
         })
+    }
+}
+
+fn mock_value_for_schema(schema: &serde_json::Value) -> serde_json::Value {
+    if let Some(value) = schema
+        .get("enum")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|values| values.first())
+    {
+        return value.clone();
+    }
+    let schema_type = schema.get("type").and_then(serde_json::Value::as_str);
+    match schema_type {
+        Some("object") => {
+            let required = schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str);
+            let properties = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            let mut output = serde_json::Map::new();
+            for field in required {
+                let value = properties
+                    .and_then(|properties| properties.get(field))
+                    .map(mock_value_for_schema)
+                    .unwrap_or(serde_json::Value::Null);
+                output.insert(field.to_string(), value);
+            }
+            serde_json::Value::Object(output)
+        }
+        Some("array") => serde_json::Value::Array(Vec::new()),
+        Some("string") => serde_json::Value::String("Mock capability result".to_string()),
+        Some("integer") => serde_json::json!(0),
+        Some("number") => serde_json::json!(0.0),
+        Some("boolean") => serde_json::Value::Bool(false),
+        _ => serde_json::Value::Null,
     }
 }
 

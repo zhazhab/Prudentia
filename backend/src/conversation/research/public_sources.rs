@@ -13,6 +13,7 @@ use crate::ai::ConversationResearchSource;
 use super::{ResearchError, ResearchPlan};
 
 mod filing_excerpt;
+mod http_retry;
 mod sec_company_facts;
 
 use filing_excerpt::official_document_excerpt;
@@ -31,22 +32,20 @@ pub(super) async fn official_filings(
     } else {
         "10"
     };
-    let response = client
-        .get("https://www.sec.gov/cgi-bin/browse-edgar")
-        .header(USER_AGENT, SEC_USER_AGENT)
-        .query(&[
-            ("action", "getcompany"),
-            ("CIK", symbol.as_str()),
-            ("owner", "exclude"),
-            ("count", filing_count),
-            ("output", "atom"),
-        ])
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let response = http_retry::text(
+        client
+            .get("https://www.sec.gov/cgi-bin/browse-edgar")
+            .header(USER_AGENT, SEC_USER_AGENT)
+            .query(&[
+                ("action", "getcompany"),
+                ("CIK", symbol.as_str()),
+                ("owner", "exclude"),
+                ("count", filing_count),
+                ("output", "atom"),
+            ])
+            .timeout(std::time::Duration::from_secs(20)),
+    )
+    .await?;
     let candidates = parse_sec_filings(&response, plan.company_name(), annual_history_years)?;
     let mut sources = Vec::new();
     if let (Some(years), Some(candidate)) = (annual_history_years, candidates.first()) {
@@ -75,20 +74,20 @@ pub(super) async fn independent_news(
     plan: &ResearchPlan,
 ) -> Result<Vec<ConversationResearchSource>, ResearchError> {
     let symbol = plan.base_symbol();
-    let response: YahooSearchResponse = client
-        .get("https://query1.finance.yahoo.com/v1/finance/search")
-        .header(USER_AGENT, CLIENT_USER_AGENT)
-        .query(&[
-            ("q", symbol.as_str()),
-            ("quotesCount", "1"),
-            ("newsCount", "12"),
-        ])
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let body = http_retry::text(
+        client
+            .get("https://query1.finance.yahoo.com/v1/finance/search")
+            .header(USER_AGENT, CLIENT_USER_AGENT)
+            .query(&[
+                ("q", symbol.as_str()),
+                ("quotesCount", "1"),
+                ("newsCount", "12"),
+            ])
+            .timeout(std::time::Duration::from_secs(20)),
+    )
+    .await?;
+    let response: YahooSearchResponse =
+        serde_json::from_str(&body).map_err(|error| ResearchError::Payload(error.to_string()))?;
     Ok(parse_yahoo_news(response, plan))
 }
 
@@ -104,15 +103,13 @@ pub(super) async fn community_discussions(
         .push(&symbol)
         .push("ideas")
         .push("");
-    let response = client
-        .get(url)
-        .header(USER_AGENT, CLIENT_USER_AGENT)
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let response = http_retry::text(
+        client
+            .get(url)
+            .header(USER_AGENT, CLIENT_USER_AGENT)
+            .timeout(std::time::Duration::from_secs(20)),
+    )
+    .await?;
     Ok(parse_tradingview_ideas(&response, plan))
 }
 
@@ -164,15 +161,15 @@ async fn fetch_company_facts(
     let Some(url) = sec_company_facts::company_facts_url(filing_url) else {
         return Ok(None);
     };
-    let body: Value = client
-        .get(&url)
-        .header(USER_AGENT, SEC_USER_AGENT)
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let response = http_retry::text(
+        client
+            .get(&url)
+            .header(USER_AGENT, SEC_USER_AGENT)
+            .timeout(std::time::Duration::from_secs(20)),
+    )
+    .await?;
+    let body: Value = serde_json::from_str(&response)
+        .map_err(|error| ResearchError::Payload(error.to_string()))?;
     Ok(sec_company_facts::source_from_company_facts(
         &body, &url, years,
     ))
@@ -215,26 +212,24 @@ async fn enrich_sec_filing(
     client: &Client,
     mut source: ConversationResearchSource,
 ) -> Result<Option<ConversationResearchSource>, ResearchError> {
-    let index = client
-        .get(&source.url)
-        .header(USER_AGENT, SEC_USER_AGENT)
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let index = http_retry::text(
+        client
+            .get(&source.url)
+            .header(USER_AGENT, SEC_USER_AGENT)
+            .timeout(std::time::Duration::from_secs(20)),
+    )
+    .await?;
     let Some(document_url) = best_sec_document_url(&source.url, &index) else {
         return Ok(None);
     };
-    let response = client
-        .get(&document_url)
-        .header(USER_AGENT, SEC_USER_AGENT)
-        .header(RANGE, "bytes=0-1572863")
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await?
-        .error_for_status()?;
+    let response = http_retry::response(
+        client
+            .get(&document_url)
+            .header(USER_AGENT, SEC_USER_AGENT)
+            .header(RANGE, "bytes=0-1572863")
+            .timeout(std::time::Duration::from_secs(20)),
+    )
+    .await?;
     let body = read_text_prefix(response, 1_536 * 1024).await?;
     let excerpt = official_document_excerpt(&body);
     if excerpt.is_empty() {

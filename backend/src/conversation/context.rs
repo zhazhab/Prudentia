@@ -63,6 +63,7 @@ pub async fn assemble_subject_clarification_context(
         attachments: Vec::new(),
         research_sources: Vec::new(),
         research_warning: None,
+        capability_artifacts: Vec::new(),
         subject_clarification: Some(clarification.clone()),
         used_context: vec![json!({
             "kind": "subject_clarification",
@@ -208,6 +209,7 @@ pub async fn assemble_context(
         attachments,
         research_sources,
         research_warning,
+        capability_artifacts: Vec::new(),
         subject_clarification: None,
         used_context,
     })

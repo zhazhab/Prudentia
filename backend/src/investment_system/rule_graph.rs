@@ -1,8 +1,11 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
@@ -12,11 +15,188 @@ use crate::{
 };
 
 const DEFAULT_GRAPH_ID: &str = "default";
+const MAX_RULE_GRAPH_NODES: usize = 64;
+const MAX_RULE_GRAPH_MODEL_NODES: usize = 8;
+const MAX_RULE_GRAPH_EDGES: usize = 256;
+const MAX_RULE_GRAPH_BYTES: usize = 512 * 1024;
+const MAX_RULE_EXECUTION_INPUT_BYTES: usize = 64 * 1024;
+const MAX_RULE_NODE_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_RULE_TRACE_BYTES: usize = 1024 * 1024;
+const MAX_RETAINED_RULE_EXECUTIONS: i64 = 500;
+const MAX_RULE_EXECUTION_SECONDS: u64 = 600;
+
+mod evaluation;
+pub use evaluation::{evaluate_active_rule_graph, evaluate_active_rule_graph_with_adapters};
 
 #[async_trait]
 pub trait RuleNodeAdapter: Send + Sync {
     fn key(&self) -> &str;
+    fn kind(&self) -> &str {
+        "skill"
+    }
+    fn manifest_hash(&self) -> Option<&str> {
+        None
+    }
+    fn validate_config(&self, _config: &Value) -> Result<(), String> {
+        Ok(())
+    }
     async fn execute(&self, input: Value, config: &Value) -> Result<Value, String>;
+}
+
+#[derive(Clone, Default)]
+pub struct RuleNodeAdapterRegistry {
+    adapters: Arc<HashMap<String, Arc<dyn RuleNodeAdapter>>>,
+}
+
+impl RuleNodeAdapterRegistry {
+    pub fn from_adapters(
+        adapters: impl IntoIterator<Item = Arc<dyn RuleNodeAdapter>>,
+    ) -> AppResult<Self> {
+        let mut registered = HashMap::new();
+        for adapter in adapters {
+            let key = adapter.key().trim().to_string();
+            if key.is_empty() {
+                return Err(AppError::bad_request(
+                    "rule node adapter keys cannot be empty",
+                ));
+            }
+            if registered.insert(key.clone(), adapter).is_some() {
+                return Err(AppError::bad_request(format!(
+                    "rule node adapter {key} is registered more than once"
+                )));
+            }
+        }
+        Ok(Self {
+            adapters: Arc::new(registered),
+        })
+    }
+
+    pub fn available_keys(&self) -> HashSet<String> {
+        self.adapters.keys().cloned().collect()
+    }
+
+    pub fn validate_graph(&self, graph: &RuleGraph) -> AppResult<()> {
+        validate_graph(graph, &self.available_keys())?;
+        self.validate_graph_kinds(graph)
+    }
+
+    pub fn pin_graph(&self, graph: &mut RuleGraph) -> AppResult<()> {
+        self.validate_graph(graph)?;
+        for node in graph
+            .nodes
+            .iter_mut()
+            .filter(|node| matches!(node.kind.as_str(), "skill" | "agent"))
+        {
+            let key = node
+                .config
+                .get("adapter")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let adapter = self.adapters.get(key).ok_or_else(|| {
+                AppError::bad_request(format!("rule node adapter {key} is unavailable"))
+            })?;
+            if let Some(hash) = adapter.manifest_hash() {
+                node.config
+                    .as_object_mut()
+                    .expect("validated adapter config is an object")
+                    .insert("manifest_hash".to_string(), Value::String(hash.to_string()));
+            }
+        }
+        self.validate_pinned_graph(graph)
+    }
+
+    fn validate_pinned_graph(&self, graph: &RuleGraph) -> AppResult<()> {
+        self.validate_graph(graph)?;
+        for node in graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind.as_str(), "skill" | "agent"))
+        {
+            let key = node
+                .config
+                .get("adapter")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let adapter = self.adapters.get(key).ok_or_else(|| {
+                AppError::bad_request(format!("rule node adapter {key} is unavailable"))
+            })?;
+            if let Some(current_hash) = adapter.manifest_hash() {
+                let pinned_hash = node
+                    .config
+                    .get("manifest_hash")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if pinned_hash != current_hash {
+                    return Err(AppError::bad_request(format!(
+                        "node {} pins a different manifest for adapter {}; activate a new graph version",
+                        node.id, key
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn execute(&self, key: &str, input: Value, config: &Value) -> AppResult<Value> {
+        let adapter = self.adapters.get(key).ok_or_else(|| {
+            AppError::bad_request(format!("rule node adapter {key} is unavailable"))
+        })?;
+        adapter
+            .execute(input, config)
+            .await
+            .map_err(|error| AppError::bad_request(format!("adapter {key} failed: {error}")))
+    }
+
+    fn validate_graph_kinds(&self, graph: &RuleGraph) -> AppResult<()> {
+        for node in graph
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.kind.as_str(), "skill" | "agent"))
+        {
+            let key = node
+                .config
+                .get("adapter")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let adapter = self.adapters.get(key).ok_or_else(|| {
+                AppError::bad_request(format!("rule node adapter {key} is unavailable"))
+            })?;
+            if adapter.kind() != node.kind {
+                return Err(AppError::bad_request(format!(
+                    "node {} is kind {} but adapter {} is kind {}",
+                    node.id,
+                    node.kind,
+                    key,
+                    adapter.kind()
+                )));
+            }
+            let expected_operation = key.split_once('@').map_or(key, |(name, _)| name);
+            if node.operation != expected_operation {
+                return Err(AppError::bad_request(format!(
+                    "node {} operation must match adapter capability {}",
+                    node.id, expected_operation
+                )));
+            }
+            adapter.validate_config(&node.config).map_err(|error| {
+                AppError::bad_request(format!(
+                    "node {} configuration is invalid: {error}",
+                    node.id
+                ))
+            })?;
+            if let (Some(current_hash), Some(pinned_hash)) = (
+                adapter.manifest_hash(),
+                node.config.get("manifest_hash").and_then(Value::as_str),
+            ) {
+                if current_hash != pinned_hash {
+                    return Err(AppError::bad_request(format!(
+                        "node {} manifest hash does not match adapter {}",
+                        node.id, key
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,20 +281,34 @@ pub async fn activate_rule_graph(
     patch: RuleGraphPatch,
     action_id: Option<&str>,
 ) -> AppResult<RuleGraphVersion> {
+    activate_rule_graph_with_adapters(pool, patch, action_id, &RuleNodeAdapterRegistry::default())
+        .await
+}
+
+pub async fn activate_rule_graph_with_adapters(
+    pool: &SqlitePool,
+    patch: RuleGraphPatch,
+    action_id: Option<&str>,
+    adapters: &RuleNodeAdapterRegistry,
+) -> AppResult<RuleGraphVersion> {
+    let RuleGraphPatch {
+        base_version,
+        mut graph,
+    } = patch;
     let active = active_rule_graph(pool).await?;
-    if patch.base_version != active.version {
+    if base_version != active.version {
         return Err(AppError::bad_request(format!(
             "rule graph changed from version {} to {}; regenerate the proposal",
-            patch.base_version, active.version
+            base_version, active.version
         )));
     }
-    validate_graph(&patch.graph, &HashSet::new())?;
+    adapters.pin_graph(&mut graph)?;
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "UPDATE investment_rule_graph_versions SET status = 'superseded' WHERE graph_id = ? AND status = 'active'",
     )
-    .bind(&patch.graph.graph_id)
+    .bind(&graph.graph_id)
     .execute(&mut *transaction)
     .await?;
     let version = active.version + 1;
@@ -126,9 +320,9 @@ pub async fn activate_rule_graph(
         ) VALUES (?, ?, ?, 'active', ?, ?, ?)"#,
     )
     .bind(&id)
-    .bind(&patch.graph.graph_id)
+    .bind(&graph.graph_id)
     .bind(version)
-    .bind(serde_json::to_string(&patch.graph)?)
+    .bind(serde_json::to_string(&graph)?)
     .bind(action_id)
     .bind(&created_at)
     .execute(&mut *transaction)
@@ -137,65 +331,11 @@ pub async fn activate_rule_graph(
 
     Ok(RuleGraphVersion {
         id,
-        graph_id: patch.graph.graph_id.clone(),
+        graph_id: graph.graph_id.clone(),
         version,
         status: "active".to_string(),
-        graph: patch.graph,
+        graph,
         created_at,
-    })
-}
-
-pub async fn evaluate_active_rule_graph(
-    pool: &SqlitePool,
-    input: Value,
-) -> AppResult<RuleEvaluation> {
-    let version = active_rule_graph(pool).await?;
-    validate_graph(&version.graph, &HashSet::new())?;
-    let order = topological_order(&version.graph)?;
-    let mut outputs = HashMap::<String, Value>::new();
-    let mut trace = Vec::new();
-
-    for node_id in order {
-        let node = version
-            .graph
-            .nodes
-            .iter()
-            .find(|node| node.id == node_id)
-            .expect("validated node exists");
-        let incoming = incoming_values(&version.graph, &node.id, &outputs);
-        let node_input = json!({ "context": input, "incoming": incoming });
-        validate_json_shape(&node_input, &node.input_schema, "node input")?;
-        let output = execute_fixed_node(node, &input, &incoming)?;
-        validate_json_shape(&output, &node.output_schema, "node output")?;
-        outputs.insert(node.id.clone(), output.clone());
-        trace.push(RuleNodeTrace {
-            node_id: node.id.clone(),
-            input: node_input,
-            output,
-        });
-    }
-
-    let output = terminal_output(&version.graph, &outputs);
-    let execution_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        r#"INSERT INTO investment_rule_executions (
-            id, graph_version_id, input_json, trace_json, output_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)"#,
-    )
-    .bind(&execution_id)
-    .bind(&version.id)
-    .bind(serde_json::to_string(&input)?)
-    .bind(serde_json::to_string(&trace)?)
-    .bind(serde_json::to_string(&output)?)
-    .bind(now_iso())
-    .execute(pool)
-    .await?;
-
-    Ok(RuleEvaluation {
-        execution_id,
-        graph_version: version.version,
-        output,
-        trace,
     })
 }
 
@@ -214,22 +354,53 @@ pub fn validate_graph(graph: &RuleGraph, adapters: &HashSet<String>) -> AppResul
     if graph.graph_id.trim().is_empty() || graph.name.trim().is_empty() {
         return Err(AppError::bad_request("rule graph id and name are required"));
     }
+    ensure_json_size(graph, MAX_RULE_GRAPH_BYTES, "rule graph")?;
+    if graph.nodes.len() > MAX_RULE_GRAPH_NODES || graph.edges.len() > MAX_RULE_GRAPH_EDGES {
+        return Err(AppError::bad_request(format!(
+            "rule graph exceeds the limit of {MAX_RULE_GRAPH_NODES} nodes or {MAX_RULE_GRAPH_EDGES} edges"
+        )));
+    }
+    let model_node_count = graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind.as_str(), "skill" | "agent"))
+        .count();
+    if model_node_count > MAX_RULE_GRAPH_MODEL_NODES {
+        return Err(AppError::bad_request(format!(
+            "rule graph exceeds the limit of {MAX_RULE_GRAPH_MODEL_NODES} model-backed nodes"
+        )));
+    }
     let mut ids = HashSet::new();
     for node in &graph.nodes {
-        if node.id.trim().is_empty() || !ids.insert(node.id.clone()) {
+        if node.id.trim().is_empty()
+            || node.label.trim().is_empty()
+            || node.operation.trim().is_empty()
+            || !ids.insert(node.id.clone())
+        {
             return Err(AppError::bad_request(
-                "rule node ids must be unique and non-empty",
+                "rule nodes require unique ids, labels, and operations",
             ));
         }
+        validate_rule_schema(&node.input_schema, "rule node input_schema")?;
+        validate_rule_schema(&node.output_schema, "rule node output_schema")?;
         match node.kind.as_str() {
             "fixed" => validate_fixed_operation(&node.operation)?,
             "skill" | "agent" => {
+                if !node.config.is_object() {
+                    return Err(AppError::bad_request(format!(
+                        "node {} configuration must be an object",
+                        node.id
+                    )));
+                }
                 let adapter = node
                     .config
                     .get("adapter")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if adapter.is_empty() || !adapters.contains(adapter) {
+                let version_is_exact = adapter.rsplit_once('@').is_some_and(|(name, version)| {
+                    !name.is_empty() && version.parse::<u16>().is_ok()
+                });
+                if !version_is_exact || !adapters.contains(adapter) {
                     return Err(AppError::bad_request(format!(
                         "node {} requires unavailable adapter {}",
                         node.id, adapter
@@ -243,10 +414,15 @@ pub fn validate_graph(graph: &RuleGraph, adapters: &HashSet<String>) -> AppResul
             }
         }
     }
+    let mut edge_ids = HashSet::new();
     for edge in &graph.edges {
-        if !ids.contains(&edge.from_node) || !ids.contains(&edge.to_node) {
+        if edge.id.trim().is_empty()
+            || !edge_ids.insert(edge.id.clone())
+            || !ids.contains(&edge.from_node)
+            || !ids.contains(&edge.to_node)
+        {
             return Err(AppError::bad_request(format!(
-                "edge {} references a missing node",
+                "edge {} must have a unique id and reference existing nodes",
                 edge.id
             )));
         }
@@ -299,152 +475,21 @@ fn topological_order(graph: &RuleGraph) -> AppResult<Vec<String>> {
     Ok(order)
 }
 
-fn execute_fixed_node(node: &RuleNode, context: &Value, incoming: &[Value]) -> AppResult<Value> {
-    if node.kind != "fixed" {
-        return Err(AppError::bad_request(format!(
-            "node {} requires an adapter",
-            node.id
-        )));
-    }
-    match node.operation.as_str() {
-        "input" => {
-            let key = node
-                .config
-                .get("key")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            Ok(context.get(key).cloned().unwrap_or(Value::Null))
-        }
-        "compare" => compare_value(node, context, incoming),
-        "range" => range_value(node, context, incoming),
-        "all" => Ok(Value::Bool(incoming.iter().all(truthy))),
-        "any" => Ok(Value::Bool(incoming.iter().any(truthy))),
-        "not" => Ok(Value::Bool(!incoming.first().is_some_and(truthy))),
-        "output" => Ok(incoming.first().cloned().unwrap_or_else(|| context.clone())),
-        _ => Err(AppError::bad_request("unsupported fixed operation")),
-    }
-}
-
-fn compare_value(node: &RuleNode, context: &Value, incoming: &[Value]) -> AppResult<Value> {
-    let left = operand(node, context, incoming);
-    let right = node.config.get("value").cloned().unwrap_or(Value::Null);
-    let operator = node
-        .config
-        .get("operator")
-        .and_then(Value::as_str)
-        .unwrap_or("eq");
-    let result = match operator {
-        "eq" => left == right,
-        "ne" => left != right,
-        "gt" | "gte" | "lt" | "lte" => {
-            let left = left
-                .as_f64()
-                .ok_or_else(|| AppError::bad_request("compare input must be numeric"))?;
-            let right = right
-                .as_f64()
-                .ok_or_else(|| AppError::bad_request("compare value must be numeric"))?;
-            match operator {
-                "gt" => left > right,
-                "gte" => left >= right,
-                "lt" => left < right,
-                _ => left <= right,
-            }
-        }
-        _ => return Err(AppError::bad_request("compare operator is invalid")),
-    };
-    Ok(Value::Bool(result))
-}
-
-fn range_value(node: &RuleNode, context: &Value, incoming: &[Value]) -> AppResult<Value> {
-    let value = operand(node, context, incoming)
-        .as_f64()
-        .ok_or_else(|| AppError::bad_request("range input must be numeric"))?;
-    let min = node
-        .config
-        .get("min")
-        .and_then(Value::as_f64)
-        .unwrap_or(f64::NEG_INFINITY);
-    let max = node
-        .config
-        .get("max")
-        .and_then(Value::as_f64)
-        .unwrap_or(f64::INFINITY);
-    Ok(Value::Bool(value >= min && value <= max))
-}
-
-fn operand(node: &RuleNode, context: &Value, incoming: &[Value]) -> Value {
-    incoming.first().cloned().unwrap_or_else(|| {
-        node.config
-            .get("key")
-            .and_then(Value::as_str)
-            .and_then(|key| context.get(key))
-            .cloned()
-            .unwrap_or(Value::Null)
-    })
-}
-
-fn truthy(value: &Value) -> bool {
-    value.as_bool().unwrap_or(false)
-}
-
-fn validate_json_shape(value: &Value, schema: &Value, label: &str) -> AppResult<()> {
+fn validate_rule_schema(schema: &Value, label: &str) -> AppResult<()> {
     if schema.is_null() || schema.as_object().is_some_and(|object| object.is_empty()) {
         return Ok(());
     }
-    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
-        let valid = match expected {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "number" => value.is_number(),
-            "string" => value.is_string(),
-            "boolean" => value.is_boolean(),
-            "null" => value.is_null(),
-            _ => false,
-        };
-        if !valid {
-            return Err(AppError::bad_request(format!(
-                "{label} does not match schema type {expected}"
-            )));
-        }
-    }
-    if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        let object = value
-            .as_object()
-            .ok_or_else(|| AppError::bad_request(format!("{label} must be an object")))?;
-        for key in required.iter().filter_map(Value::as_str) {
-            if !object.contains_key(key) {
-                return Err(AppError::bad_request(format!(
-                    "{label} is missing required field {key}"
-                )));
-            }
-        }
+    crate::json_schema::validate_schema_contract(schema, label).map_err(AppError::bad_request)
+}
+
+fn ensure_json_size<T: Serialize>(value: &T, limit: usize, label: &str) -> AppResult<()> {
+    let size = serde_json::to_vec(value)?.len();
+    if size > limit {
+        return Err(AppError::bad_request(format!(
+            "{label} is {size} bytes; the limit is {limit} bytes"
+        )));
     }
     Ok(())
-}
-
-fn incoming_values(
-    graph: &RuleGraph,
-    node_id: &str,
-    outputs: &HashMap<String, Value>,
-) -> Vec<Value> {
-    graph
-        .edges
-        .iter()
-        .filter(|edge| edge.to_node == node_id)
-        .filter(|edge| edge.condition.as_ref().is_none_or(truthy))
-        .filter_map(|edge| outputs.get(&edge.from_node).cloned())
-        .collect()
-}
-
-fn terminal_output(graph: &RuleGraph, outputs: &HashMap<String, Value>) -> Value {
-    graph
-        .nodes
-        .iter()
-        .rev()
-        .find(|node| node.operation == "output")
-        .and_then(|node| outputs.get(&node.id))
-        .cloned()
-        .unwrap_or(Value::Null)
 }
 
 async fn load_active(pool: &SqlitePool) -> AppResult<Option<RuleGraphVersion>> {
@@ -525,6 +570,8 @@ fn default_graph() -> RuleGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use sqlx::sqlite::SqlitePoolOptions;
 
     #[test]
     fn rejects_cycles() {
@@ -535,6 +582,184 @@ mod tests {
             edges: vec![edge("a-b", "a", "b"), edge("b-a", "b", "a")],
         };
         assert!(validate_graph(&graph, &HashSet::new()).is_err());
+    }
+
+    struct ThresholdAdapter;
+
+    #[async_trait]
+    impl RuleNodeAdapter for ThresholdAdapter {
+        fn key(&self) -> &str {
+            "threshold_check@1"
+        }
+
+        fn manifest_hash(&self) -> Option<&str> {
+            Some("threshold-manifest-v1")
+        }
+
+        fn validate_config(&self, config: &Value) -> Result<(), String> {
+            config
+                .get("threshold")
+                .and_then(Value::as_i64)
+                .map(|_| ())
+                .ok_or_else(|| "threshold must be an integer".to_string())
+        }
+
+        async fn execute(&self, input: Value, config: &Value) -> Result<Value, String> {
+            let threshold = config
+                .get("threshold")
+                .and_then(Value::as_i64)
+                .unwrap_or(70);
+            Ok(Value::Bool(
+                input
+                    .get("context")
+                    .and_then(|context| context.get("score"))
+                    .and_then(Value::as_i64)
+                    .is_some_and(|score| score >= threshold),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_adapter_executes_inside_the_versioned_graph() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        crate::database::migrate(&pool).await.expect("migrate");
+        let adapters = RuleNodeAdapterRegistry::from_adapters([
+            Arc::new(ThresholdAdapter) as Arc<dyn RuleNodeAdapter>
+        ])
+        .expect("adapter registry");
+        let graph = RuleGraph {
+            graph_id: DEFAULT_GRAPH_ID.to_string(),
+            name: "adapter graph".to_string(),
+            nodes: vec![
+                RuleNode {
+                    id: "threshold".to_string(),
+                    label: "Threshold".to_string(),
+                    kind: "skill".to_string(),
+                    operation: "threshold_check".to_string(),
+                    config: json!({
+                        "adapter": "threshold_check@1",
+                        "threshold": 70
+                    }),
+                    input_schema: json!({ "type": "object", "required": ["context"] }),
+                    output_schema: json!({ "type": "boolean" }),
+                    x: 0.0,
+                    y: 0.0,
+                },
+                node("result", "output"),
+            ],
+            edges: vec![edge("threshold-result", "threshold", "result")],
+        };
+
+        let activated = activate_rule_graph_with_adapters(
+            &pool,
+            RuleGraphPatch {
+                base_version: 1,
+                graph,
+            },
+            None,
+            &adapters,
+        )
+        .await
+        .expect("activate graph");
+        let evaluated =
+            evaluate_active_rule_graph_with_adapters(&pool, json!({ "score": 75 }), &adapters)
+                .await
+                .expect("evaluate graph");
+
+        assert_eq!(activated.version, 2);
+        assert_eq!(
+            activated.graph.nodes[0].config["manifest_hash"],
+            "threshold-manifest-v1"
+        );
+        assert_eq!(evaluated.output, Value::Bool(true));
+        assert_eq!(evaluated.trace.len(), 2);
+        assert_eq!(evaluated.trace[0].node_id, "threshold");
+        assert_eq!(evaluated.trace[0].input["context_ref"], "execution_input");
+        assert!(evaluated.trace[0].input.get("context").is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_adapter_configuration_before_activation() {
+        let adapters = RuleNodeAdapterRegistry::from_adapters([
+            Arc::new(ThresholdAdapter) as Arc<dyn RuleNodeAdapter>
+        ])
+        .expect("adapter registry");
+        let graph = RuleGraph {
+            graph_id: DEFAULT_GRAPH_ID.to_string(),
+            name: "invalid adapter config".to_string(),
+            nodes: vec![RuleNode {
+                id: "threshold".to_string(),
+                label: "Threshold".to_string(),
+                kind: "skill".to_string(),
+                operation: "threshold_check".to_string(),
+                config: json!({ "adapter": "threshold_check@1" }),
+                input_schema: Value::Null,
+                output_schema: Value::Null,
+                x: 0.0,
+                y: 0.0,
+            }],
+            edges: Vec::new(),
+        };
+
+        let error = adapters
+            .validate_graph(&graph)
+            .expect_err("invalid adapter configuration must fail");
+
+        assert!(error.to_string().contains("threshold must be an integer"));
+    }
+
+    #[test]
+    fn rejects_graphs_over_the_node_limit() {
+        let graph = RuleGraph {
+            graph_id: DEFAULT_GRAPH_ID.to_string(),
+            name: "oversized".to_string(),
+            nodes: (0..=MAX_RULE_GRAPH_NODES)
+                .map(|index| node(&format!("node-{index}"), "output"))
+                .collect(),
+            edges: Vec::new(),
+        };
+
+        let error = validate_graph(&graph, &HashSet::new())
+            .expect_err("oversized graph must fail validation");
+
+        assert!(error.to_string().contains("exceeds the limit"));
+    }
+
+    #[test]
+    fn adapter_kind_must_match_the_rule_node_kind() {
+        let adapters = RuleNodeAdapterRegistry::from_adapters([
+            Arc::new(ThresholdAdapter) as Arc<dyn RuleNodeAdapter>
+        ])
+        .expect("adapter registry");
+        let graph = RuleGraph {
+            graph_id: DEFAULT_GRAPH_ID.to_string(),
+            name: "kind mismatch".to_string(),
+            nodes: vec![RuleNode {
+                id: "challenger".to_string(),
+                label: "Challenger".to_string(),
+                kind: "agent".to_string(),
+                operation: "threshold_check".to_string(),
+                config: json!({
+                    "adapter": "threshold_check@1",
+                    "threshold": 70
+                }),
+                input_schema: Value::Null,
+                output_schema: Value::Null,
+                x: 0.0,
+                y: 0.0,
+            }],
+            edges: Vec::new(),
+        };
+
+        let error = adapters
+            .validate_graph(&graph)
+            .expect_err("adapter kind mismatch must fail");
+
+        assert!(error.to_string().contains("is kind agent"));
     }
 
     fn node(id: &str, operation: &str) -> RuleNode {

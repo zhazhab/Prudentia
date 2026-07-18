@@ -8,14 +8,15 @@ use tokio::sync::mpsc;
 use crate::{
     ai::{
         prompt::{
-            conversation_projection_prompt, conversation_response_prompt,
-            investment_system_refinement_prompt, memo_chat_prompt, memo_extraction_prompt,
-            parse_json_object, portfolio_review_prompt, research_distillation_prompt,
-            stock_snapshot_prompt,
+            agent_execution_prompt, capability_execution_prompt, conversation_projection_prompt,
+            conversation_response_prompt, investment_system_refinement_prompt, memo_chat_prompt,
+            memo_extraction_prompt, parse_json_object, portfolio_review_prompt,
+            research_distillation_prompt, stock_snapshot_prompt,
         },
-        AiError, AiProvider, AiProviderEvent, ConversationContext, ConversationProjection,
-        InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioImageRecognition,
-        PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
+        AgentModelRequest, AiError, AiProvider, AiProviderEvent, CapabilityModelRequest,
+        ConversationContext, ConversationProjection, InvestmentSystemRefinement, MemoChatContext,
+        MemoExtraction, PortfolioImageRecognition, PortfolioReviewContext, ResearchAnalysis,
+        ResearchSourceInput, StockSnapshotContext,
     },
     investment_system::InvestmentSystem,
     locale::Locale,
@@ -183,6 +184,24 @@ impl OpenAiCompatibleProvider {
 
 #[async_trait]
 impl AiProvider for OpenAiCompatibleProvider {
+    async fn execute_capability(
+        &self,
+        request: &CapabilityModelRequest,
+        locale: Locale,
+    ) -> Result<serde_json::Value, AiError> {
+        self.chat_json(capability_execution_prompt(request, locale))
+            .await
+    }
+
+    async fn execute_agent_turn(
+        &self,
+        request: &AgentModelRequest,
+        locale: Locale,
+    ) -> Result<serde_json::Value, AiError> {
+        self.chat_json(agent_execution_prompt(request, locale))
+            .await
+    }
+
     async fn respond_to_conversation(
         &self,
         context: &ConversationContext,

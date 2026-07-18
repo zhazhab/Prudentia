@@ -37,6 +37,7 @@ pub fn build_router_with_config(
         market_data.clone(),
         conversation::research_provider_from_config(config),
         config.workspace_dir.clone(),
+        config.capability_dir.clone(),
     );
     let recovery = conversation.clone();
     tokio::spawn(async move {
