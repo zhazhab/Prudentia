@@ -6,7 +6,10 @@ use sqlx::SqlitePool;
 use crate::{
     ai::ConversationActionDraft,
     error::{AppError, AppResult},
-    investment_system::{activate_rule_graph, active_rule_graph, RuleGraphPatch},
+    investment_system::{
+        activate_rule_graph_with_adapters, active_rule_graph, RuleGraphPatch,
+        RuleNodeAdapterRegistry,
+    },
     market_data::MarketDataProvider,
     portfolio::{prepare_trade_record, record_trade, TradeRecord},
 };
@@ -20,6 +23,7 @@ use super::{
 pub async fn prepare_action(
     pool: &SqlitePool,
     market_data: Arc<dyn MarketDataProvider>,
+    rule_node_adapters: &RuleNodeAdapterRegistry,
     mut draft: ConversationActionDraft,
 ) -> AppResult<(ConversationActionDraft, Option<i64>)> {
     match draft.action_type.as_str() {
@@ -60,6 +64,7 @@ pub async fn prepare_action(
                 })?;
             let version = active_rule_graph(pool).await?.version;
             patch.base_version = version;
+            rule_node_adapters.validate_graph(&patch.graph)?;
             draft.payload = serde_json::to_value(patch)?;
             Ok((draft, Some(version)))
         }
@@ -77,6 +82,7 @@ pub async fn execute_action(
     pool: &SqlitePool,
     workspace_dir: &Path,
     market_data: Arc<dyn MarketDataProvider>,
+    rule_node_adapters: &RuleNodeAdapterRegistry,
     action_id: &str,
     expected_version: Option<i64>,
 ) -> AppResult<ConversationAction> {
@@ -95,7 +101,14 @@ pub async fn execute_action(
         }
     }
     storage::complete_action(pool, action_id, "executing", None, None).await?;
-    let result = execute_action_inner(pool, workspace_dir, market_data, &action).await;
+    let result = execute_action_inner(
+        pool,
+        workspace_dir,
+        market_data,
+        rule_node_adapters,
+        &action,
+    )
+    .await;
     match result {
         Ok(result) => {
             storage::complete_action(pool, action_id, "executed", Some(result), None).await
@@ -146,6 +159,7 @@ async fn execute_action_inner(
     pool: &SqlitePool,
     workspace_dir: &Path,
     market_data: Arc<dyn MarketDataProvider>,
+    rule_node_adapters: &RuleNodeAdapterRegistry,
     action: &ConversationAction,
 ) -> AppResult<Value> {
     match action.action_type.as_str() {
@@ -173,7 +187,13 @@ async fn execute_action_inner(
         }
         "rule_graph_patch" => {
             let patch: RuleGraphPatch = serde_json::from_value(action.payload.clone())?;
-            let version = activate_rule_graph(pool, patch, Some(&action.id)).await?;
+            let version = activate_rule_graph_with_adapters(
+                pool,
+                patch,
+                Some(&action.id),
+                rule_node_adapters,
+            )
+            .await?;
             Ok(serde_json::to_value(version)?)
         }
         _ => Err(AppError::bad_request("unsupported conversation action")),

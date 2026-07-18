@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use tokio::{sync::mpsc, time::timeout};
 
 use crate::{
-    ai::{AiError, AiProviderEvent, ConversationProjection, ConversationResearchSource},
+    ai::{AiError, AiProviderEvent, ConversationProjection},
     error::{AppError, AppResult},
     locale::Locale,
 };
@@ -12,14 +12,15 @@ use crate::{
 use super::{
     super::{
         actions,
+        capabilities::{CapabilityExecutionContext, CapabilityStage, ToolLifecycleEvent, ToolPlan},
         context::{
             assemble_context, assemble_subject_clarification_context, ConversationResearchContext,
         },
-        research::{execute_with_cache, plan_research, ResearchProgress},
+        execution_plan::build_company_execution_plan,
         storage,
         subject_resolution::resolve_turn_subject,
         task_routing::{assess_task, subject_clarification_assessment},
-        types::{ConversationRun, PersistedResearchSource, RunEvent},
+        types::{ConversationRun, RunEvent},
     },
     events::ConversationEvent,
     task::{TurnCancellation, TurnTask},
@@ -27,17 +28,14 @@ use super::{
     turn_support::{
         action_projection_complexity, action_projection_timeout, action_type_allowed_for_subject,
         casual_turn_summary, enrich_draft, fallback_summary, finish_visible_response,
-        response_timeout, should_skip_action_projection, AbortOnDropTask,
+        response_timeout, should_skip_action_projection,
     },
     ConversationEngine,
 };
 
-#[derive(Default)]
-struct ResearchArtifacts {
-    model_sources: Vec<ConversationResearchSource>,
-    persisted_sources: Vec<PersistedResearchSource>,
-    warning: Option<String>,
-}
+mod tool_runtime;
+
+use tool_runtime::TurnArtifacts;
 
 impl ConversationEngine {
     pub(super) fn spawn(self: &Arc<Self>, run_id: String, locale: Locale) {
@@ -48,9 +46,8 @@ impl ConversationEngine {
             let _ = start_rx.await;
             if let Err(error) = engine.run_turn(&task_run_id, locale, &cancellation).await {
                 if !cancellation.is_cancelled() {
-                    let _ = engine
-                        .fail_run(&task_run_id, "conversation_failed", &error.to_string())
-                        .await;
+                    tracing::error!(run_id = %task_run_id, %error, "conversation run failed");
+                    let _ = engine.fail_run(&task_run_id, "conversation_failed").await;
                 }
             }
             engine
@@ -75,11 +72,95 @@ impl ConversationEngine {
         let turn = self
             .resolve_turn_context(run_id, locale, cancellation)
             .await?;
-        let research = self.execute_research(&turn, cancellation).await?;
-        let step = self
+        let research_plan = turn.tool_plan.for_stage(&[CapabilityStage::Research]);
+        let research_planned = research_plan.has_calls();
+        if research_planned {
+            self.update_plan_step(&turn, "research", "running").await?;
+        }
+        let research = self
+            .execute_tools(
+                &turn,
+                research_plan,
+                CapabilityExecutionContext::without_conversation(turn.locale),
+                cancellation,
+            )
+            .await?;
+        if research_planned {
+            let status = if research.had_failures {
+                "failed"
+            } else {
+                "completed"
+            };
+            self.update_plan_step(&turn, "research", status).await?;
+        }
+        self.update_plan_step(&turn, "evidence_baseline", "running")
+            .await?;
+        let mut step = self
             .assemble_step_context(turn, research, cancellation)
             .await?;
+        self.update_plan_step(&step.turn, "evidence_baseline", "completed")
+            .await?;
+        let mut analysis_ran = false;
+        let mut challenge_ran = false;
+        if step.turn.clarification.is_none() {
+            let analysis_plan = step
+                .turn
+                .tool_plan
+                .for_stage(&[CapabilityStage::Analysis, CapabilityStage::Challenge]);
+            if analysis_plan.has_calls() {
+                analysis_ran = analysis_plan.has_stage(CapabilityStage::Analysis);
+                challenge_ran = analysis_plan.has_stage(CapabilityStage::Challenge);
+                if analysis_ran {
+                    self.update_plan_step(&step.turn, "analysis", "running")
+                        .await?;
+                }
+                if challenge_ran {
+                    self.update_plan_step(&step.turn, "challenge", "running")
+                        .await?;
+                }
+                let analysis = self
+                    .execute_tools(
+                        &step.turn,
+                        analysis_plan,
+                        CapabilityExecutionContext::with_conversation(
+                            step.turn.locale,
+                            Arc::new(step.model.clone()),
+                        ),
+                        cancellation,
+                    )
+                    .await?;
+                step.absorb(analysis);
+                if analysis_ran {
+                    self.update_plan_step(&step.turn, "analysis", "completed")
+                        .await?;
+                }
+                if challenge_ran {
+                    self.update_plan_step(&step.turn, "challenge", "completed")
+                        .await?;
+                }
+            }
+        }
+        if !analysis_ran {
+            self.update_plan_step(&step.turn, "analysis", "running")
+                .await?;
+        }
+        if !challenge_ran {
+            self.update_plan_step(&step.turn, "challenge", "running")
+                .await?;
+        }
+        self.update_plan_step(&step.turn, "synthesis", "running")
+            .await?;
         let (assistant_response, saw_delta) = self.generate_response(&step, cancellation).await?;
+        if !analysis_ran {
+            self.update_plan_step(&step.turn, "analysis", "completed")
+                .await?;
+        }
+        if !challenge_ran {
+            self.update_plan_step(&step.turn, "challenge", "completed")
+                .await?;
+        }
+        self.update_plan_step(&step.turn, "synthesis", "completed")
+            .await?;
         cancellation.ensure_active()?;
 
         let source_payloads = step.source_payloads()?;
@@ -87,6 +168,7 @@ impl ConversationEngine {
             &self.pool,
             run_id,
             &assistant_response,
+            &step.artifacts,
             &source_payloads,
             &step.model.used_context,
         )
@@ -114,6 +196,8 @@ impl ConversationEngine {
             return Ok(());
         }
 
+        self.update_plan_step(&step.turn, "memo_update", "running")
+            .await?;
         self.project_and_persist_turn(&step, &assistant_response, &message_id, cancellation)
             .await
     }
@@ -138,10 +222,21 @@ impl ConversationEngine {
         let (subject, clarification, effective_user_message) =
             resolve_turn_subject(&self.pool, &run.thread_id, &user_message).await?;
         cancellation.ensure_active()?;
-        let research_plan = clarification
-            .is_none()
-            .then(|| plan_research(&effective_user_message, &subject))
-            .flatten();
+        let tool_plan = if clarification.is_none() {
+            self.tools
+                .plan_turn(run_id, &effective_user_message, &subject)?
+        } else {
+            ToolPlan::empty()
+        };
+        let execution_plan = if clarification.is_none() {
+            build_company_execution_plan(
+                &effective_user_message,
+                &subject,
+                tool_plan.has_stage(CapabilityStage::Research),
+            )
+        } else {
+            None
+        };
         let assessment = if clarification.is_some() {
             subject_clarification_assessment()
         } else {
@@ -149,7 +244,7 @@ impl ConversationEngine {
                 &effective_user_message,
                 &subject,
                 storage::run_has_attachments(&self.pool, run_id).await?,
-                research_plan.is_some(),
+                tool_plan.has_calls(),
             )
         };
         storage::set_run_task_assessment(
@@ -171,6 +266,14 @@ impl ConversationEngine {
             },
         )
         .await?;
+        if let Some(plan) = &execution_plan {
+            self.emit(
+                run_id,
+                &run.thread_id,
+                ConversationEvent::RunPlanCreated { plan: plan.clone() },
+            )
+            .await?;
+        }
 
         Ok(TurnContext {
             run,
@@ -181,84 +284,15 @@ impl ConversationEngine {
             clarification,
             task_complexity: assessment.complexity,
             route_reason: assessment.reason,
-            research_plan,
+            tool_plan,
+            execution_plan,
         })
-    }
-
-    async fn execute_research(
-        &self,
-        turn: &TurnContext,
-        cancellation: &TurnCancellation,
-    ) -> AppResult<ResearchArtifacts> {
-        let Some(research_plan) = turn.research_plan.clone() else {
-            return Ok(ResearchArtifacts::default());
-        };
-        cancellation.ensure_active()?;
-        let (research_tx, mut research_rx) = mpsc::unbounded_channel();
-        let research_pool = self.pool.clone();
-        let research_provider = self.research.clone();
-        let mut research = AbortOnDropTask::new(tokio::spawn(async move {
-            execute_with_cache(
-                &research_pool,
-                research_provider,
-                &research_plan,
-                research_tx,
-            )
-            .await
-        }));
-        let research_outcome = loop {
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => {
-                    return Err(AppError::internal("conversation run canceled"));
-                }
-                event = research_rx.recv() => {
-                    let Some(progress) = event else {
-                        break research.join().await.map_err(|error| {
-                            AppError::internal(format!("research task failed: {error}"))
-                        })?;
-                    };
-                    self.handle_research_progress(&turn.run, progress).await?;
-                }
-                result = research.join() => {
-                    break result.map_err(|error| {
-                        AppError::internal(format!("research task failed: {error}"))
-                    })?;
-                },
-            }
-        };
-        while let Ok(progress) = research_rx.try_recv() {
-            cancellation.ensure_active()?;
-            self.handle_research_progress(&turn.run, progress).await?;
-        }
-
-        let mut artifacts = ResearchArtifacts::default();
-        match research_outcome {
-            Ok(outcome) => {
-                artifacts.warning = outcome.warning;
-                for source in outcome.sources {
-                    cancellation.ensure_active()?;
-                    let persisted =
-                        storage::insert_source(&self.pool, &turn.run.id, &source).await?;
-                    self.emit(
-                        &turn.run.id,
-                        &turn.run.thread_id,
-                        ConversationEvent::SourceAdded(persisted.clone()),
-                    )
-                    .await?;
-                    artifacts.persisted_sources.push(persisted);
-                    artifacts.model_sources.push(source);
-                }
-            }
-            Err(error) => artifacts.warning = Some(error.to_string()),
-        }
-        Ok(artifacts)
     }
 
     async fn assemble_step_context(
         &self,
         turn: TurnContext,
-        research: ResearchArtifacts,
+        research: TurnArtifacts,
         cancellation: &TurnCancellation,
     ) -> AppResult<StepContext> {
         cancellation.ensure_active()?;
@@ -294,6 +328,7 @@ impl ConversationEngine {
             turn,
             model,
             sources: research.persisted_sources,
+            artifacts: research.artifacts,
         })
     }
 
@@ -445,7 +480,14 @@ impl ConversationEngine {
                 continue;
             }
             enrich_draft(&mut draft, &turn.subject);
-            match actions::prepare_action(&self.pool, self.market_data.clone(), draft).await {
+            match actions::prepare_action(
+                &self.pool,
+                self.market_data.clone(),
+                self.tools.rule_node_adapters(),
+                draft,
+            )
+            .await
+            {
                 Ok((draft, target_version)) => {
                     cancellation.ensure_active()?;
                     let action = storage::insert_action(
@@ -477,6 +519,8 @@ impl ConversationEngine {
             }
         }
         cancellation.ensure_active()?;
+        self.update_plan_step(turn, "memo_update", "completed")
+            .await?;
         let transitioned = storage::finish_run(
             &self.pool,
             &turn.run.id,
@@ -573,18 +617,64 @@ impl ConversationEngine {
         }
     }
 
-    async fn handle_research_progress(
+    async fn update_plan_step(
+        &self,
+        turn: &TurnContext,
+        step_id: &str,
+        status: &str,
+    ) -> AppResult<()> {
+        if turn.execution_plan.is_none() {
+            return Ok(());
+        }
+        self.emit(
+            &turn.run.id,
+            &turn.run.thread_id,
+            ConversationEvent::RunPlanStep {
+                step_id: step_id.to_string(),
+                status: status.to_string(),
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn handle_tool_lifecycle(
         &self,
         run: &ConversationRun,
-        progress: ResearchProgress,
+        event: ToolLifecycleEvent,
     ) -> AppResult<()> {
-        self.phase(
-            run,
-            "researching",
-            None,
-            Some(json!({ "activity": progress.code() })),
-        )
-        .await
+        match &event {
+            ToolLifecycleEvent::Started {
+                activity, stage, ..
+            }
+            | ToolLifecycleEvent::Progress {
+                activity, stage, ..
+            } => {
+                let phase = match stage {
+                    CapabilityStage::Research => "researching",
+                    CapabilityStage::Analysis | CapabilityStage::Challenge => "generating",
+                };
+                storage::set_run_phase(&self.pool, &run.id, phase, None, Some(activity), None)
+                    .await?;
+            }
+            ToolLifecycleEvent::Completed {
+                source_count,
+                stage,
+                ..
+            } => {
+                let source_count = i64::try_from(*source_count).unwrap_or(i64::MAX);
+                let phase = match stage {
+                    CapabilityStage::Research => "researching",
+                    CapabilityStage::Analysis | CapabilityStage::Challenge => "generating",
+                };
+                storage::set_run_phase(&self.pool, &run.id, phase, None, None, Some(source_count))
+                    .await?;
+            }
+            ToolLifecycleEvent::Failed { .. } => {}
+        }
+        self.emit(&run.id, &run.thread_id, ConversationEvent::Tool(event))
+            .await?;
+        Ok(())
     }
 
     pub(super) async fn phase(
@@ -617,7 +707,8 @@ impl ConversationEngine {
         Ok(())
     }
 
-    async fn fail_run(&self, run_id: &str, code: &str, message: &str) -> AppResult<()> {
+    async fn fail_run(&self, run_id: &str, code: &str) -> AppResult<()> {
+        const PUBLIC_MESSAGE: &str = "The response could not be completed. Retry the request.";
         let run = storage::run_by_id(&self.pool, run_id).await?;
         let transitioned = storage::finish_run(
             &self.pool,
@@ -625,7 +716,7 @@ impl ConversationEngine {
             "failed",
             "failed",
             Some(code),
-            Some(message),
+            Some(PUBLIC_MESSAGE),
         )
         .await?;
         if transitioned {
@@ -635,7 +726,7 @@ impl ConversationEngine {
                 &run.thread_id,
                 ConversationEvent::RunFailed {
                     code: code.to_string(),
-                    message: message.to_string(),
+                    message: PUBLIC_MESSAGE.to_string(),
                     retryable: true,
                 },
             )

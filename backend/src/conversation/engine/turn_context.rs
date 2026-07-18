@@ -7,9 +7,9 @@ use crate::{
 };
 
 use super::super::{
-    research::ResearchPlan,
+    capabilities::ToolPlan,
     task_routing::TaskRouteReason,
-    types::{ConversationRun, PersistedResearchSource, ThreadSubject},
+    types::{ConversationExecutionPlan, ConversationRun, PersistedResearchSource, ThreadSubject},
 };
 
 pub(super) struct TurnContext {
@@ -21,13 +21,15 @@ pub(super) struct TurnContext {
     pub(super) clarification: Option<ConversationSubjectClarification>,
     pub(super) task_complexity: TaskComplexity,
     pub(super) route_reason: TaskRouteReason,
-    pub(super) research_plan: Option<ResearchPlan>,
+    pub(super) tool_plan: ToolPlan,
+    pub(super) execution_plan: Option<ConversationExecutionPlan>,
 }
 
 pub(super) struct StepContext {
     pub(super) turn: TurnContext,
     pub(super) model: ConversationContext,
     pub(super) sources: Vec<PersistedResearchSource>,
+    pub(super) artifacts: Vec<Value>,
 }
 
 impl StepContext {

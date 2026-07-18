@@ -1,11 +1,142 @@
 use sqlx::sqlite::SqlitePoolOptions;
 
-use crate::{ai::ConversationActionDraft, database, locale::Locale};
+use crate::{
+    ai::{ConversationActionDraft, ConversationResearchSource},
+    database,
+    locale::Locale,
+};
 
 use super::{
-    append_event, complete_assistant_message, create_run, finish_run, insert_action, thread_detail,
-    StartRunRequest,
+    active_runs, append_event, complete_assistant_message, create_run, finish_run, insert_action,
+    insert_source, thread_detail, StartRunRequest,
 };
+
+#[tokio::test]
+async fn sources_are_deduplicated_by_url_within_one_run() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite");
+    database::migrate(&pool).await.expect("migrate");
+    let request = StartRunRequest {
+        client_request_id: "source-dedup-test".to_string(),
+        thread_id: None,
+        client_thread_id: Some("source-dedup-thread".to_string()),
+        content: "analyze the company".to_string(),
+        attachment_ids: Vec::new(),
+        locale: Some("en-US".to_string()),
+    };
+    let (run, _) = create_run(&pool, &request, Locale::En, None)
+        .await
+        .expect("create run");
+    let source = ConversationResearchSource {
+        title: "Primary source".to_string(),
+        url: "https://example.com/filing".to_string(),
+        snippet: "bounded evidence".to_string(),
+        source_tier: "primary".to_string(),
+    };
+
+    let (first, first_inserted) = insert_source(&pool, &run.id, &source)
+        .await
+        .expect("insert first source");
+    let (second, second_inserted) = insert_source(&pool, &run.id, &source)
+        .await
+        .expect("reuse source");
+
+    assert!(first_inserted);
+    assert!(!second_inserted);
+    assert_eq!(first.id, second.id);
+    let count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM conversation_sources WHERE run_id = ?")
+            .bind(&run.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count sources");
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+async fn active_runs_restore_unfinished_capability_calls() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("connect sqlite");
+    database::migrate(&pool).await.expect("migrate");
+    let request = StartRunRequest {
+        client_request_id: "active-capability-test".to_string(),
+        thread_id: None,
+        client_thread_id: Some("active-capability-thread".to_string()),
+        content: "audit the moat".to_string(),
+        attachment_ids: Vec::new(),
+        locale: Some("en-US".to_string()),
+    };
+    let (run, thread_id) = create_run(&pool, &request, Locale::En, None)
+        .await
+        .expect("create run");
+    let payload = serde_json::json!({
+        "call_id": "call-1",
+        "tool_name": "audit_moat",
+        "tool_version": 1,
+        "capability_kind": "skill",
+        "display_name": "Moat audit",
+        "stage": "analysis",
+        "activity": "skill_auditing_moat",
+        "subject_label": "Example",
+        "step_index": 1,
+        "total_steps": 1
+    });
+    append_event(&pool, &run.id, &thread_id, "tool.started", payload)
+        .await
+        .expect("append tool start");
+    append_event(
+        &pool,
+        &run.id,
+        &thread_id,
+        "run.plan.created",
+        serde_json::json!({
+            "template_id": "company_analysis_v1",
+            "scope": "moat",
+            "dimensions": ["business_model", "moat"],
+            "steps": [
+                { "id": "scope", "status": "completed" },
+                { "id": "research", "status": "pending" }
+            ]
+        }),
+    )
+    .await
+    .expect("append run plan");
+    append_event(
+        &pool,
+        &run.id,
+        &thread_id,
+        "run.plan.step",
+        serde_json::json!({ "step_id": "research", "status": "running" }),
+    )
+    .await
+    .expect("append plan progress");
+
+    let active = active_runs(&pool).await.expect("load active runs");
+    assert_eq!(active[0].active_capabilities.len(), 1);
+    assert_eq!(active[0].active_capabilities[0].call_id, "call-1");
+    let plan = active[0].execution_plan.as_ref().expect("active run plan");
+    assert_eq!(plan.scope, "moat");
+    assert_eq!(plan.steps[1].status, "running");
+
+    append_event(
+        &pool,
+        &run.id,
+        &thread_id,
+        "tool.completed",
+        serde_json::json!({ "call_id": "call-1" }),
+    )
+    .await
+    .expect("append tool completion");
+    assert!(active_runs(&pool).await.expect("reload active runs")[0]
+        .active_capabilities
+        .is_empty());
+}
 
 #[tokio::test]
 async fn terminal_run_compacts_only_streaming_delta_events() {
@@ -141,7 +272,7 @@ async fn thread_actions_reference_the_assistant_message_that_proposed_them() {
     let (run, thread_id) = create_run(&pool, &request, Locale::En, None)
         .await
         .expect("create run");
-    let message_id = complete_assistant_message(&pool, &run.id, "analysis", &[], &[])
+    let message_id = complete_assistant_message(&pool, &run.id, "analysis", &[], &[], &[])
         .await
         .expect("complete assistant message");
     let action = insert_action(

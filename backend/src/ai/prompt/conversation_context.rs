@@ -35,6 +35,7 @@ pub(super) fn response(context: &ConversationContext) -> Value {
         "attachments": &context.attachments,
         "research_sources": &context.research_sources,
         "research_warning": &context.research_warning,
+        "capability_artifacts": &context.capability_artifacts,
         "used_context": used_context,
     })
 }

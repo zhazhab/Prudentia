@@ -1,10 +1,14 @@
 use serde_json::json;
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 
-use super::{extract_company_hint, resolve_subject, resume_pending_request, SubjectResolution};
+use super::{
+    extract_company_hint, resolve_subject, resolve_turn_subject, resume_pending_request,
+    SubjectResolution,
+};
 use crate::{
     ai::ConversationSubjectCandidate,
     conversation::{
+        research::plan_research,
         storage,
         types::{StartRunRequest, ThreadSubject},
     },
@@ -46,6 +50,64 @@ async fn directory_short_name_selects_only_the_unique_primary_security() {
     };
 
     assert_eq!(subject.subject_key.as_deref(), Some("3690.HK"));
+}
+
+#[tokio::test]
+async fn nasdaq_directory_description_does_not_hide_the_company_name() {
+    let (pool, thread_id) = general_thread().await;
+    insert_security(&pool, "NFLX", "Netflix, Inc. - Common Stock").await;
+    let hint = extract_company_hint("分析 Netflix 的护城河");
+
+    assert_eq!(hint.as_deref(), Some("netflix"));
+    assert!(
+        super::candidate_score(
+            "分析 Netflix 的护城河",
+            hint.as_deref(),
+            "NFLX",
+            "Netflix, Inc. - Common Stock",
+            false,
+        ) >= 140
+    );
+
+    let resolution = resolve_subject(&pool, &thread_id, "分析 Netflix 的护城河")
+        .await
+        .expect("resolve subject");
+    let SubjectResolution::Resolved(subject) = resolution else {
+        panic!("expected Netflix to resolve from the Nasdaq directory name");
+    };
+
+    assert_eq!(subject.subject_key.as_deref(), Some("NFLX"));
+}
+
+#[tokio::test]
+async fn unique_transposition_typo_resolves_without_confirmation() {
+    let (pool, thread_id) = general_thread().await;
+    insert_security(&pool, "NFLX", "Netflix, Inc. - Common Stock").await;
+
+    let resolution = resolve_subject(&pool, &thread_id, "分析 netlfix 的护城河")
+        .await
+        .expect("resolve subject");
+    let SubjectResolution::Resolved(subject) = resolution else {
+        panic!("expected the unique high-confidence fuzzy company match");
+    };
+
+    assert_eq!(subject.subject_key.as_deref(), Some("NFLX"));
+}
+
+#[tokio::test]
+async fn tied_fuzzy_company_matches_still_require_confirmation() {
+    let (pool, thread_id) = general_thread().await;
+    insert_security(&pool, "ABCD", "Netlix Holdings").await;
+    insert_security(&pool, "NFLX", "Netflix, Inc. - Common Stock").await;
+
+    let resolution = resolve_subject(&pool, &thread_id, "分析 netlfix 的护城河")
+        .await
+        .expect("resolve subject");
+    let SubjectResolution::NeedsClarification(clarification) = resolution else {
+        panic!("expected ambiguous fuzzy matches to require confirmation");
+    };
+
+    assert_eq!(clarification.candidates.len(), 2);
 }
 
 #[tokio::test]
@@ -208,6 +270,41 @@ async fn ordinal_confirmation_resumes_the_original_request() {
     assert_eq!(subject.subject_key.as_deref(), Some("9988.HK"));
     assert!(resumed.starts_with("分析一下阿里"));
     assert!(resumed.contains("阿里巴巴－Ｗ (9988.HK)"));
+}
+
+#[tokio::test]
+async fn affirmative_single_candidate_confirmation_resumes_research_request() {
+    let (pool, thread_id) = general_thread().await;
+    insert_single_candidate_pending_clarification(&pool, &thread_id).await;
+
+    let (subject, clarification, effective_message) =
+        resolve_turn_subject(&pool, &thread_id, "是的")
+            .await
+            .expect("resolve confirmation");
+
+    assert!(clarification.is_none());
+    assert_eq!(subject.subject_key.as_deref(), Some("NFLX"));
+    assert!(effective_message.starts_with("分析网飞的护城河"));
+    assert!(effective_message.contains("Netflix (NFLX)"));
+    assert!(plan_research(&effective_message, &subject).is_some());
+}
+
+#[tokio::test]
+async fn affirmative_reply_recovers_a_natural_single_company_clarification() {
+    let (pool, thread_id) = general_thread().await;
+    insert_security(&pool, "NFLX", "Netflix").await;
+    insert_empty_pending_clarification(&pool, &thread_id).await;
+    insert_natural_company_clarification(&pool, &thread_id).await;
+
+    let (subject, clarification, effective_message) =
+        resolve_turn_subject(&pool, &thread_id, "是的")
+            .await
+            .expect("resolve confirmation");
+
+    assert!(clarification.is_none());
+    assert_eq!(subject.subject_key.as_deref(), Some("NFLX"));
+    assert!(effective_message.starts_with("分析网飞的护城河"));
+    assert!(plan_research(&effective_message, &subject).is_some());
 }
 
 #[tokio::test]
@@ -377,6 +474,76 @@ async fn insert_pending_clarification(pool: &SqlitePool, thread_id: &str) {
     .execute(pool)
     .await
     .expect("insert pending clarification");
+}
+
+async fn insert_single_candidate_pending_clarification(pool: &SqlitePool, thread_id: &str) {
+    let candidates = vec![ConversationSubjectCandidate {
+        symbol: "NFLX".to_string(),
+        name: "Netflix".to_string(),
+    }];
+    let used_context = json!([{
+        "kind": "subject_clarification",
+        "original_request": "分析网飞的护城河",
+        "target_hint": "网飞",
+        "candidates": candidates,
+    }]);
+    sqlx::query(
+        r#"INSERT INTO memo_thread_messages (
+            id, thread_id, role, content, status, request_id, artifacts_json,
+            sources_json, used_context_json, created_at, updated_at
+        ) VALUES (
+            'single-pending-clarification', ?, 'assistant', '你指的是 Netflix 吗？', 'completed',
+            'single-pending-request', '[]', '[]', ?,
+            '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'
+        )"#,
+    )
+    .bind(thread_id)
+    .bind(used_context.to_string())
+    .execute(pool)
+    .await
+    .expect("insert pending clarification");
+}
+
+async fn insert_empty_pending_clarification(pool: &SqlitePool, thread_id: &str) {
+    let used_context = json!([{
+        "kind": "subject_clarification",
+        "original_request": "分析网飞的护城河",
+        "target_hint": "网飞",
+        "candidates": [],
+    }]);
+    sqlx::query(
+        r#"INSERT INTO memo_thread_messages (
+            id, thread_id, role, content, status, request_id, artifacts_json,
+            sources_json, used_context_json, created_at, updated_at
+        ) VALUES (
+            'empty-pending-clarification', ?, 'assistant', '请提供公司全名或证券代码。', 'completed',
+            'empty-pending-request', '[]', '[]', ?,
+            '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z'
+        )"#,
+    )
+    .bind(thread_id)
+    .bind(used_context.to_string())
+    .execute(pool)
+    .await
+    .expect("insert empty pending clarification");
+}
+
+async fn insert_natural_company_clarification(pool: &SqlitePool, thread_id: &str) {
+    sqlx::query(
+        r#"INSERT INTO memo_thread_messages (
+            id, thread_id, role, content, status, request_id, artifacts_json,
+            sources_json, used_context_json, created_at, updated_at
+        ) VALUES (
+            'natural-company-clarification', ?, 'assistant',
+            '你指的是 Netflix（奈飞，NASDAQ：NFLX）吗？', 'canceled',
+            'natural-company-request', '[]', '[]', '[]',
+            '2026-01-02T00:01:00Z', '2026-01-02T00:01:00Z'
+        )"#,
+    )
+    .bind(thread_id)
+    .execute(pool)
+    .await
+    .expect("insert natural company clarification");
 }
 
 async fn insert_position(pool: &SqlitePool, symbol: &str, name: &str) {

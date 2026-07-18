@@ -36,6 +36,7 @@ Base URL：`http://127.0.0.1:8080`
 - `GET /api/conversation/runs/active`
 - `POST /api/conversation/runs/{id}/cancel`
 - `POST /api/conversation/runs/{id}/retry`
+- `GET /api/conversation/capabilities`
 - `GET /api/conversation/events/ws?after_event_id={cursor}`
 - `GET /api/conversation/threads`
 - `GET /api/conversation/threads/{id}?message_limit=50&before_message_id={id}`
@@ -63,13 +64,17 @@ Base URL：`http://127.0.0.1:8080`
 }
 ```
 
-同一个线程最多有一个 `queued`/`running` 任务，不同线程可以并行。阶段为 `queued`、`resolving_subject`、`loading_context`、`researching`、`generating`、`extracting_actions`、`persisting`，终态为 `completed`、`failed`、`canceled` 或 `interrupted`；其中 `researching` 只在需要外部检索时出现，`extracting_actions` 会对无附件、无检索结果的纯寒暄或能力询问省略。动作提取固定使用适合其领域的模型档位，并按原运行难度设置硬超时：轻量/标准为 120 秒，深度为 300 秒。`ConversationRun` 还持久化 `task_complexity`（`simple` / `standard` / `deep`）、实际 `model`、稳定的 `route_reason`、当前 `activity` 和 `source_count`，刷新页面可直接恢复最后一个具体活动。取消会终止真实 provider 进程；重试从原用户消息创建新运行。后端启动时会把遗留活动运行标记为 `interrupted`。
+同一个线程最多有一个 `queued`/`running` 任务，不同线程可以并行。阶段为 `queued`、`resolving_subject`、`loading_context`、`researching`、`generating`、`extracting_actions`、`persisting`，终态为 `completed`、`failed`、`canceled` 或 `interrupted`；其中 `researching` 只在需要外部检索时出现，`extracting_actions` 会对无附件、无检索结果的纯寒暄或能力询问省略。动作提取固定使用适合其领域的模型档位，并按原运行难度设置硬超时：轻量/标准为 120 秒，深度为 300 秒。`ConversationRun` 还持久化 `task_complexity`（`simple` / `standard` / `deep`）、实际 `model`、稳定的 `route_reason`、当前 `activity`、`source_count`，并返回 `active_capabilities[]` 未完成调用快照；Agent 快照还可包含当前 `nested_tool_name`、`nested_tool_display_name`、`agent_turn` 和 `agent_turn_limit`。实质性公司任务还返回 `execution_plan`，其字段为稳定的 `template_id`、`scope`、`dimensions[]` 和有序 `steps[]`；步骤状态为 `pending`、`running`、`completed`、`failed` 或 `skipped`。刷新页面可直接恢复最后一个具体活动、完整研究计划和全部并行能力。取消会终止真实 provider 进程；重试从原用户消息创建新运行。后端启动时会把遗留活动运行标记为 `interrupted`。
 
-公司简称解析只有唯一高置信候选时才进入 `researching`。多候选或显式公司请求无法识别时，运行使用 `task_complexity=simple`、`route_reason=subject_clarification`，真实 AI 只收到用户原话和候选列表并询问公司全称或证券代码；此轮 `source_count=0`，不会读取或回退到线程绑定公司的上下文，也不会进入动作提取。确认消息的 `used_context` 持久化 `original_request` 和候选列表；下一轮回复唯一证券代码或候选序号时，以已确认公司继续原请求，否则再次进入确认状态。
+公司简称解析只有唯一高置信候选时才进入 `researching`。本地证券目录中受限编辑距离内唯一的英文公司名拼写错误也视为高置信候选；如果存在并列近似结果，仍按多候选处理。多候选或显式公司请求无法识别时，运行使用 `task_complexity=simple`、`route_reason=subject_clarification`，真实 AI 只收到用户原话和候选列表并询问公司全称或证券代码；此轮 `source_count=0`，不会创建 `execution_plan`，不会读取或回退到线程绑定公司的上下文，也不会进入动作提取。确认消息的 `used_context` 持久化 `original_request` 和候选列表；下一轮回复唯一证券代码或候选序号时，以已确认公司继续原请求，否则再次进入确认状态。公司确认后不会再用范围确认阻塞运行：未限定范围时 `scope=default` 并采用 `company_analysis_v1` 综合模板，明确的商业模式、护城河、财务、新闻、风险或基本面问题使用对应稳定范围代码并直接开始执行。
 
-事件 WebSocket 只订阅持久化事件，不拥有任务生命周期。每个事件包含单调递增的 `event_id`、`run_id`、`thread_id`、`event_type`、`payload` 和 `created_at`。客户端把最后处理的序号传给 `after_event_id`，服务端先重放再持续推送；常见事件为 `run.accepted`、`run.classified`、`run.routed`、`run.phase`、`message.delta`、`message.completed`、`source.added`、`action.proposed`、`action.updated`、`run.warning` 和各类运行终态。`run.classified` 先提供任务等级与分级原因，`run.routed` 提供实际 provider/model，两者都携带更新后的完整 `run` 快照，避免并发活动任务读取覆盖新事件；`run.phase.payload.detail.activity` 提供研究缓存、抓取和来源核验等应用阶段，`provider_stage` 提供 AI 阅读、分析和组织回复等 provider 阶段。这些值是稳定的机器代码，前端负责本地化。OpenAI-compatible provider 发送真实 SSE token delta，并在首个 delta 到达时切换为组织回复；CLI provider 没有 token delta 时只发送阶段，完成后一次持久化正文，不做伪流式分段。`message.delta` 只在运行处于活动状态时持久化，供刷新和断线续传；进入任一终态后，完整 assistant 消息与 `message.completed` 成为重放依据，对应 delta 行会被压缩删除。研究结果缓存复用 24 小时，并在后续检索时物理删除过期行。
+事件 WebSocket 只订阅持久化事件，不拥有任务生命周期。每个事件包含单调递增的 `event_id`、`run_id`、`thread_id`、`event_type`、`payload` 和 `created_at`。客户端把最后处理的序号传给 `after_event_id`，服务端先重放再持续推送；常见事件为 `run.accepted`、`run.classified`、`run.routed`、`run.phase`、`run.plan.created`、`run.plan.step`、`tool.started`、`tool.progress`、`tool.completed`、`tool.failed`、`message.delta`、`message.completed`、`source.added`、`action.proposed`、`action.updated`、`run.warning` 和各类运行终态。`run.classified` 先提供任务等级与分级原因，`run.routed` 提供最终回复的实际 provider/model，两者都携带更新后的完整 `run` 快照；`run.phase` 和 `provider_stage` 分别提供非工具应用阶段与 AI 阅读/分析/组织回复阶段。`run.plan.created` 携带完整 `execution_plan`，`run.plan.step` 携带 `step_id` 和新 `status`；终态失败、中断或取消时，前端将仍在执行的步骤显示为失败、尚未开始的步骤显示为跳过。工具事件统一携带 `call_id`、`tool_name`、`tool_version`、`capability_kind`、`display_name`、`stage`、`step_index` 和 `total_steps`；开始/进度事件还包含稳定 `activity` 与可选 `subject_label`。Agent 的进度事件另外携带可选 `nested_tool_name`、`nested_tool_display_name`、`agent_turn` 和 `agent_turn_limit`，只描述真实决策/调用状态。完成事件包含 `duration_ms`、`source_count` 和 `warning`，失败事件包含稳定错误代码与消息。`stage` 为 `research`、`analysis` 或 `challenge`，前端可同时维护多个活动调用。事件不保存工具原始 `arguments`、Capability instructions、观察或结果正文。OpenAI-compatible provider 发送真实 SSE token delta；CLI provider 没有 token delta 时只发送阶段，完成后一次持久化正文。`message.delta` 只在运行处于活动状态时持久化，进入任一终态后由完整消息和 `message.completed` 取代并压缩删除。研究结果缓存复用 24 小时，并在后续检索时物理删除过期行。
 
-公司研究会把“近五年”、`5 years`、`2021—2025` 等要求标准化为 2—10 年的年度范围，并纳入 provider 缓存身份。public-sources 从 SEC Company Facts XBRL 生成逐年收入、毛利、收入成本、经营利润、净利润、销售营销费用、经营现金流，并在标签可用时加入资本开支、股权激励、稀释加权股数、自由现金流代理值及每股代理值。代理值只等于经营现金流减总资本开支，不代表已拆分维持性投入的所有者收益；单年数值若相对前后两年同时出现 50 倍以上孤立数量级异常，会从该指标序列剔除并在摘要中明确标记。原始 JSON 不写入 SQLite。运行期间会发送 `run.phase`，其 `detail.activity` 为 `research_fetching_financial_history`。
+`GET /api/conversation/capabilities` 返回实际注册的 `id`、`version`、`kind`、`stage`、展示名、说明、产物类型、模型档位、最大步骤、`surfaces`、`subjects`、`manifest_hash`，以及 Agent 的 `loaded_skills[]` 与 `allowed_tools[]` 精确版本引用，不返回 instructions。`skill`/`agent` 的成功或失败结果写入 assistant 消息 `artifacts[]`；成功项包含 `payload`、来源 ID、状态、manifest hash、耗时、每个模型步骤的 provider/model，以及 Agent 的有界 `agent_trace[]`。内置分析 payload 包含 `evidence_assessment`、`summary`、`findings[]` 和 `open_questions[]`；每条 finding 保存类别、判断、事实/推断/假设、结构化来源与日期、因果链、反论、未知项、信心、领先指标、证伪条件和决策影响。后端拒绝不在冻结上下文/Tool 观察中的 `source_urls`，也拒绝没有来源却标为 `fact` 的 finding。轨迹只记录轮次、动作、Tool id/版本/展示名、状态、来源数量和稳定错误码，不保存参数、观察或研究正文。失败项只包含稳定公开错误类别与安全消息，原始 provider/CLI 错误不会进入 API。每轮最多三个模型 Capability，单个 payload 最大 48 KiB；事件只保留元数据，因此不会再复制产物正文。清单格式与规则图 adapter 契约见 [对话能力扩展](capabilities.md)。
+
+`research_company` 的首个 activity 为 `research_preparing_company`；`research_community_insights` 为 `research_preparing_community_insights`，之后仅发送社区搜索、来源核验、完成或失败事件。纯社区问题使用后者；同时要求商业模式、财务、护城河或综合公司判断时使用前者的完整证据计划并包含社区类别，防止社区观点替代一手与独立来源。普通公司研究与社区专项结果使用不同缓存键，分别保留 24 小时。
+
+公司研究会把“近五年”、`5 years`、`2021—2025` 等要求标准化为 2—10 年的年度范围，并纳入 provider 缓存身份。public-sources 从 SEC Company Facts XBRL 生成逐年收入、毛利、收入成本、经营利润、净利润、销售营销费用、经营现金流，并在标签可用时加入资本开支、股权激励、稀释加权股数、自由现金流代理值及每股代理值。代理值只等于经营现金流减总资本开支，不代表已拆分维持性投入的所有者收益；单年数值若相对前后两年同时出现 50 倍以上孤立数量级异常，会从该指标序列剔除并在摘要中明确标记。原始 JSON 不写入 SQLite。运行期间由 `research_company` 发送 `tool.progress`，其 `activity` 为 `research_fetching_financial_history`。
 
 线程详情返回 `thread.subject`、活动运行、`latest_run`、分页消息、确认动作和当前公司看法。主题仅允许 `company`、`investment_system`、`psychology`、`general`；修正主题示例：
 
@@ -92,7 +97,7 @@ Base URL：`http://127.0.0.1:8080`
 }
 ```
 
-模型只能提出 `company_view_patch`、`trade_record`、`rule_graph_patch` 动作。编辑请求为 `{"payload": {...}}`；确认请求为 `{"expected_version": 3}`。每项动作独立确认、拒绝或失败，并使用目标版本与幂等执行状态防止重复写入。公司看法按章节创建不可变版本和 Markdown 投影；交易由确定性账本代码校验历史汇率、基线、成本、超卖和 TWR 资金流；规则补丁只有通过 DAG、端口、配置、JSON Schema 和 adapter 可用性校验后才会激活。
+模型只能提出 `company_view_patch`、`trade_record`、`rule_graph_patch` 动作。编辑请求为 `{"payload": {...}}`；确认请求为 `{"expected_version": 3}`。每项动作独立确认、拒绝或失败，并使用目标版本与幂等执行状态防止重复写入。公司看法按章节创建不可变版本和 Markdown 投影；交易由确定性账本代码校验历史汇率、基线、成本、超卖和 TWR 资金流；规则补丁只有通过 DAG、节点输入/输出 JSON Schema、节点/adapter 类型一致和精确版本 adapter 可用性校验后才会激活。
 
 公司看法兼容字段 `business_quality` 的产品语义是“商业模式、竞争与盈利质量”，也是确认卡、右侧上下文和 Markdown 投影的首章。内容应覆盖用户/客户/付费方、价值链、变现方式、竞争强度、公司相对竞争位置、各方议价权、利润池、定价权、成本与再投资结构、单位经济、资本密集度，以及持续盈利难度；其中竞争强度、相对竞争位置和盈利难度应保留明确评级及其证据。其他兼容章节依次为护城河、财务、估值预期、投资逻辑、风险、催化剂、反证和开放问题；当前公司经营分析不会自动写入 `valuation_expectations`，`thesis` 只保存公司经营逻辑。
 
@@ -110,7 +115,7 @@ Base URL：`http://127.0.0.1:8080`
 - `POST /api/investment-system/graph/evaluate`
 - `GET /api/investment-system/legacy`
 
-活动投资系统是版本化 DAG。节点类型为 `fixed`、`skill`、`agent`，固定执行内核支持输入、数值比较、区间、布尔组合和输出；执行响应包含结果与节点轨迹。新版本只通过已确认的 `rule_graph_patch` 创建并原子激活。`legacy` 返回迁移前自然语言体系的只读快照，不参与规则执行。旧根路径和 AI refine 仅保留兼容代码，不是首页的写入入口。
+活动投资系统是版本化 DAG。节点类型为 `fixed`、`skill`、`agent`，固定执行内核支持输入、数值比较、区间、布尔组合和输出；声明了 `rule_graph` surface 的模型 Capability 以 `id@version` 作为 adapter，节点类型必须与 adapter 类型一致。执行响应包含结果及每个节点的输入/输出轨迹。新版本只通过已确认的 `rule_graph_patch` 创建并原子激活。`legacy` 返回迁移前自然语言体系的只读快照，不参与规则执行。旧根路径和 AI refine 仅保留兼容代码，不是首页的写入入口。
 
 ## Research
 

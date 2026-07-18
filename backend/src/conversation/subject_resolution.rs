@@ -16,9 +16,10 @@ use super::{
 mod matching;
 
 use matching::{
-    contains_any, contains_symbol, extract_company_hint, is_derivative_or_fund,
-    is_secondary_counter, is_strong_symbol_reference, looks_like_security_code, normalize_text,
-    trim_company_name, valid_company_alias, valid_company_hint,
+    contains_any, contains_symbol, extract_company_hint, fuzzy_company_name_score,
+    is_derivative_or_fund, is_secondary_counter, is_strong_symbol_reference,
+    looks_like_security_code, normalize_text, trim_company_name, valid_company_alias,
+    valid_company_hint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +73,18 @@ pub async fn resolve_subject(
     if let Some(pending) = load_pending_clarification(pool, thread_id).await? {
         if let Some(candidate) = select_pending_candidate(message, &pending.candidates) {
             return resolve_candidate(pool, thread_id, &current, candidate).await;
+        }
+        if is_affirmative_confirmation(message) {
+            if let [candidate] = pending.candidates.as_slice() {
+                return resolve_candidate(pool, thread_id, &current, candidate).await;
+            }
+            if pending.candidates.is_empty() {
+                if let Some(candidate) =
+                    recover_natural_clarification_candidate(pool, thread_id, &current).await?
+                {
+                    return resolve_candidate(pool, thread_id, &current, &candidate).await;
+                }
+            }
         }
         if !pending.candidates.is_empty() && is_pending_selection_reply(message) {
             return Ok(SubjectResolution::NeedsClarification(
@@ -155,12 +168,12 @@ async fn resume_pending_request(
     confirmation: &str,
     subject: &ThreadSubject,
 ) -> AppResult<Option<String>> {
-    if !is_pending_selection_reply(confirmation) {
-        return Ok(None);
-    }
     let Some(pending) = load_pending_clarification(pool, thread_id).await? else {
         return Ok(None);
     };
+    if !is_pending_selection_reply(confirmation) && !is_affirmative_confirmation(confirmation) {
+        return Ok(None);
+    }
     let Some(symbol) = subject.subject_key.as_deref() else {
         return Ok(None);
     };
@@ -295,6 +308,54 @@ fn is_pending_selection_reply(message: &str) -> bool {
         || valid_company_hint(message)
 }
 
+fn is_affirmative_confirmation(message: &str) -> bool {
+    let normalized = normalize_text(message)
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '.' | ',' | '!' | '?' | '。' | '，' | '！' | '？')
+        })
+        .to_string();
+    matches!(
+        normalized.as_str(),
+        "是" | "是的"
+            | "对"
+            | "对的"
+            | "没错"
+            | "就是它"
+            | "就是这个"
+            | "确认"
+            | "yes"
+            | "y"
+            | "correct"
+            | "that's right"
+            | "that is right"
+    )
+}
+
+async fn recover_natural_clarification_candidate(
+    pool: &SqlitePool,
+    thread_id: &str,
+    current: &ThreadSubject,
+) -> AppResult<Option<ConversationSubjectCandidate>> {
+    let content = sqlx::query_scalar::<_, String>(
+        r#"SELECT content FROM memo_thread_messages
+        WHERE thread_id = ? AND role = 'assistant'
+        ORDER BY created_at DESC LIMIT 1"#,
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(content) = content.filter(|value| {
+        value.chars().count() <= 500 && (value.contains('?') || value.contains('？'))
+    }) else {
+        return Ok(None);
+    };
+    let target_hint = extract_company_hint(&content);
+    let mut candidates =
+        company_candidates(pool, &content, target_hint.as_deref(), current).await?;
+    Ok((candidates.len() == 1).then(|| candidates.remove(0)))
+}
+
 async fn company_candidates(
     pool: &SqlitePool,
     message: &str,
@@ -365,6 +426,25 @@ async fn company_candidates(
                 false,
             );
         }
+
+        if scored.is_empty() {
+            let fuzzy_rows = sqlx::query(
+                r#"SELECT symbol, name FROM security_symbols
+                WHERE lower(substr(name, 1, 1)) = lower(substr(?, 1, 1))
+                ORDER BY length(name), symbol LIMIT 2000"#,
+            )
+            .bind(hint)
+            .fetch_all(pool)
+            .await?;
+            for row in fuzzy_rows {
+                add_fuzzy_candidate(
+                    &mut scored,
+                    hint,
+                    row.try_get("symbol")?,
+                    row.try_get("name")?,
+                );
+            }
+        }
     }
 
     let Some(top_score) = scored.values().map(|candidate| candidate.score).max() else {
@@ -392,6 +472,43 @@ async fn company_candidates(
     });
     candidates.truncate(5);
     Ok(candidates)
+}
+
+fn add_fuzzy_candidate(
+    candidates: &mut HashMap<String, ScoredCandidate>,
+    hint: &str,
+    symbol: &str,
+    name: &str,
+) {
+    let mut score = fuzzy_company_name_score(hint, name);
+    if score == 0 {
+        return;
+    }
+    if is_secondary_counter(name) {
+        score -= 60;
+    }
+    if is_derivative_or_fund(name) {
+        score -= 100;
+    }
+    if score < 140 {
+        return;
+    }
+    let candidate = ScoredCandidate {
+        company: ConversationSubjectCandidate {
+            symbol: symbol.to_string(),
+            name: name.to_string(),
+        },
+        score,
+    };
+    candidates
+        .entry(symbol.to_ascii_uppercase())
+        .and_modify(|existing| {
+            if candidate.score > existing.score {
+                existing.score = candidate.score;
+                existing.company = candidate.company.clone();
+            }
+        })
+        .or_insert(candidate);
 }
 
 fn add_candidate(

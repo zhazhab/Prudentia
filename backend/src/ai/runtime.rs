@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 use crate::{
     ai::{
         cli::{CliProviderKind, CliSettings},
-        provider_for_kind, provider_from_settings, AiError, AiProviderEvent, ConversationContext,
-        ConversationProjection, InvestmentSystemRefinement, MemoChatContext, MemoExtraction,
-        PortfolioImageRecognition, PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput,
-        StockSnapshotContext,
+        provider_for_kind, provider_from_settings, AgentModelRequest, AiError, AiProviderEvent,
+        CapabilityModelRequest, ConversationContext, ConversationProjection,
+        InvestmentSystemRefinement, MemoChatContext, MemoExtraction, PortfolioImageRecognition,
+        PortfolioReviewContext, ResearchAnalysis, ResearchSourceInput, StockSnapshotContext,
     },
     config::AppConfig,
     investment_system::InvestmentSystem,
@@ -127,6 +127,13 @@ pub struct AiSettingsResponse {
     pub cli_model_deep: String,
     pub cli_profile: Option<String>,
     pub cli_login_command: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AiCapabilityExecution {
+    pub output: serde_json::Value,
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,6 +265,76 @@ impl AiRuntime {
         provider_from_settings(&settings)
             .respond_to_memo_chat(context, locale)
             .await
+    }
+
+    pub async fn execute_capability(
+        &self,
+        request: &CapabilityModelRequest,
+        locale: Locale,
+        complexity: TaskComplexity,
+    ) -> Result<AiCapabilityExecution, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        let mut errors = Vec::new();
+        for kind in &settings.provider_chain {
+            let (routed_settings, model) = settings.routed_for(*kind, complexity);
+            match provider_for_kind(&routed_settings, *kind)
+                .execute_capability(request, locale)
+                .await
+            {
+                Ok(output) => {
+                    return Ok(AiCapabilityExecution {
+                        output,
+                        provider: kind.as_str().to_string(),
+                        model,
+                    })
+                }
+                Err(error) => errors.push(format!("{}: {error}", kind.as_str())),
+            }
+        }
+        Err(AiError::Provider(format!(
+            "all configured AI providers failed to execute capability '{}': {}",
+            request.capability_id,
+            errors.join("; ")
+        )))
+    }
+
+    pub async fn execute_agent_turn(
+        &self,
+        request: &AgentModelRequest,
+        locale: Locale,
+        complexity: TaskComplexity,
+    ) -> Result<AiCapabilityExecution, AiError> {
+        let settings = self
+            .settings
+            .read()
+            .expect("ai settings lock poisoned")
+            .clone();
+        let mut errors = Vec::new();
+        for kind in &settings.provider_chain {
+            let (routed_settings, model) = settings.routed_for(*kind, complexity);
+            match provider_for_kind(&routed_settings, *kind)
+                .execute_agent_turn(request, locale)
+                .await
+            {
+                Ok(output) => {
+                    return Ok(AiCapabilityExecution {
+                        output,
+                        provider: kind.as_str().to_string(),
+                        model,
+                    })
+                }
+                Err(error) => errors.push(format!("{}: {error}", kind.as_str())),
+            }
+        }
+        Err(AiError::Provider(format!(
+            "all configured AI providers failed to execute agent '{}': {}",
+            request.agent_id,
+            errors.join("; ")
+        )))
     }
 
     pub async fn respond_to_conversation(

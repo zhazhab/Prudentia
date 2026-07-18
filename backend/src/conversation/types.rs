@@ -64,6 +64,46 @@ pub struct ConversationRun {
     pub started_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
+    #[serde(default)]
+    pub active_capabilities: Vec<ConversationActiveCapability>,
+    #[serde(default)]
+    pub execution_plan: Option<ConversationExecutionPlan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationExecutionPlan {
+    pub template_id: String,
+    pub scope: String,
+    pub dimensions: Vec<String>,
+    pub steps: Vec<ConversationExecutionPlanStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationExecutionPlanStep {
+    pub id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationActiveCapability {
+    pub call_id: String,
+    pub tool_name: String,
+    pub tool_version: u16,
+    pub capability_kind: String,
+    pub display_name: String,
+    pub stage: String,
+    pub activity: String,
+    pub subject_label: Option<String>,
+    pub step_index: usize,
+    pub total_steps: usize,
+    #[serde(default)]
+    pub nested_tool_name: Option<String>,
+    #[serde(default)]
+    pub nested_tool_display_name: Option<String>,
+    #[serde(default)]
+    pub agent_turn: Option<u8>,
+    #[serde(default)]
+    pub agent_turn_limit: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +114,26 @@ pub struct RunEvent {
     pub event_type: String,
     pub payload: Value,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationCapabilitySummary {
+    pub id: String,
+    pub version: u16,
+    pub kind: String,
+    pub stage: String,
+    pub display_name: String,
+    pub description: String,
+    pub artifact_type: String,
+    pub model_tier: Option<String>,
+    pub max_steps: u8,
+    #[serde(default)]
+    pub loaded_skills: Vec<String>,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    pub surfaces: Vec<String>,
+    pub subjects: Vec<String>,
+    pub manifest_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

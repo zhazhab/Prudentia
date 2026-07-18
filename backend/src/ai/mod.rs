@@ -24,6 +24,16 @@ pub mod runtime;
 
 #[async_trait]
 pub trait AiProvider: Send + Sync {
+    async fn execute_capability(
+        &self,
+        request: &CapabilityModelRequest,
+        locale: Locale,
+    ) -> Result<Value, AiError>;
+    async fn execute_agent_turn(
+        &self,
+        request: &AgentModelRequest,
+        locale: Locale,
+    ) -> Result<Value, AiError>;
     async fn respond_to_conversation(
         &self,
         context: &ConversationContext,
@@ -68,6 +78,63 @@ pub trait AiProvider: Send + Sync {
     ) -> Result<PortfolioImageRecognition, AiError>;
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CapabilityModelRequest {
+    pub capability_id: String,
+    pub capability_kind: String,
+    pub instructions: String,
+    pub arguments: Value,
+    pub context: Value,
+    pub output_schema: Value,
+    pub step: u8,
+    pub max_steps: u8,
+    pub previous_output: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentModelRequest {
+    pub agent_id: String,
+    pub instructions: String,
+    pub arguments: Value,
+    pub context: Value,
+    pub final_output_schema: Value,
+    pub available_tools: Vec<AgentModelTool>,
+    pub loaded_skills: Vec<AgentModelSkill>,
+    pub observations: Vec<AgentToolObservation>,
+    pub turn: u8,
+    pub max_turns: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentModelTool {
+    pub id: String,
+    pub version: u16,
+    pub display_name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentModelSkill {
+    pub id: String,
+    pub version: u16,
+    pub description: String,
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentToolObservation {
+    pub turn: u8,
+    pub tool_id: String,
+    pub tool_version: u16,
+    pub arguments: Value,
+    pub status: String,
+    pub output: Value,
+    pub sources: Vec<ConversationResearchSource>,
+    pub warning: Option<String>,
+    pub error_code: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum AiError {
     #[error("{0}")]
@@ -106,6 +173,7 @@ pub struct ConversationContext {
     pub attachments: Vec<ConversationAttachmentContext>,
     pub research_sources: Vec<ConversationResearchSource>,
     pub research_warning: Option<String>,
+    pub capability_artifacts: Vec<Value>,
     pub subject_clarification: Option<ConversationSubjectClarification>,
     pub used_context: Vec<Value>,
 }

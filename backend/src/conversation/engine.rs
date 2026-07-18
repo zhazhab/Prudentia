@@ -11,18 +11,20 @@ use uuid::Uuid;
 use crate::{
     ai::runtime::AiRuntime,
     error::{AppError, AppResult},
+    investment_system::{evaluate_active_rule_graph_with_adapters, RuleEvaluation},
     locale::Locale,
     market_data::MarketDataProvider,
 };
 
 use super::{
     actions,
+    capabilities::ConversationTools,
     research::WebResearchProvider,
     storage,
     types::{
-        ConfirmActionRequest, ConversationAction, ConversationRun, ConversationThreadDetail,
-        ConversationThreadSummary, RunEvent, StartRunRequest, StartRunResponse, ThreadSubject,
-        UpdateActionRequest, UpdateSubjectRequest,
+        ConfirmActionRequest, ConversationAction, ConversationCapabilitySummary, ConversationRun,
+        ConversationThreadDetail, ConversationThreadSummary, RunEvent, StartRunRequest,
+        StartRunResponse, ThreadSubject, UpdateActionRequest, UpdateSubjectRequest,
     },
 };
 
@@ -34,13 +36,14 @@ mod turn_context;
 mod turn_support;
 
 use events::ConversationEvent;
+pub(super) use task::TurnCancellation;
 use task::TurnTask;
 
 pub struct ConversationEngine {
     pool: SqlitePool,
     ai: Arc<AiRuntime>,
     market_data: Arc<dyn MarketDataProvider>,
-    research: Arc<dyn WebResearchProvider>,
+    tools: Arc<ConversationTools>,
     workspace_dir: PathBuf,
     tasks: Mutex<HashMap<String, TurnTask>>,
     events: broadcast::Sender<RunEvent>,
@@ -53,13 +56,20 @@ impl ConversationEngine {
         market_data: Arc<dyn MarketDataProvider>,
         research: Arc<dyn WebResearchProvider>,
         workspace_dir: PathBuf,
+        capability_dir: PathBuf,
     ) -> Arc<Self> {
         let (events, _) = broadcast::channel(2048);
+        let tools = Arc::new(ConversationTools::new(
+            pool.clone(),
+            research,
+            ai.clone(),
+            &capability_dir,
+        ));
         Arc::new(Self {
             pool,
             ai,
             market_data,
-            research,
+            tools,
             workspace_dir,
             tasks: Mutex::new(HashMap::new()),
             events,
@@ -205,6 +215,10 @@ impl ConversationEngine {
         storage::active_runs(&self.pool).await
     }
 
+    pub fn capabilities(&self) -> Vec<ConversationCapabilitySummary> {
+        self.tools.summaries()
+    }
+
     pub async fn update_subject(
         &self,
         thread_id: &str,
@@ -250,6 +264,7 @@ impl ConversationEngine {
             &self.pool,
             &self.workspace_dir,
             self.market_data.clone(),
+            self.tools.rule_node_adapters(),
             action_id,
             request.expected_version,
         )
@@ -285,6 +300,11 @@ impl ConversationEngine {
     }
     pub fn workspace_dir(&self) -> &PathBuf {
         &self.workspace_dir
+    }
+
+    pub async fn evaluate_rule_graph(&self, input: serde_json::Value) -> AppResult<RuleEvaluation> {
+        evaluate_active_rule_graph_with_adapters(&self.pool, input, self.tools.rule_node_adapters())
+            .await
     }
 }
 

@@ -7,6 +7,7 @@ pub mod decision;
 pub mod decision_delta;
 pub mod error;
 pub mod investment_system;
+pub(crate) mod json_schema;
 pub mod locale;
 pub mod market_data;
 pub mod memo;

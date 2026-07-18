@@ -300,6 +300,100 @@ pub(super) fn valid_company_alias(value: &str) -> bool {
     }
 }
 
+pub(super) fn fuzzy_company_name_score(hint: &str, name: &str) -> i32 {
+    let hint = normalize_text(hint);
+    if !(5..=32).contains(&hint.len())
+        || !hint
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        return 0;
+    }
+    let maximum_distance = usize::from(hint.len() >= 10) + 1;
+    fuzzy_company_aliases(name)
+        .into_iter()
+        .filter(|alias| {
+            alias
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
+        })
+        .filter_map(|alias| {
+            let distance = damerau_levenshtein(&hint, &alias);
+            (distance <= maximum_distance).then_some(260 - (distance as i32 * 20))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn fuzzy_company_aliases(name: &str) -> Vec<String> {
+    let normalized = normalize_text(name);
+    let primary = normalized
+        .split([',', '，'])
+        .next()
+        .unwrap_or(&normalized)
+        .trim()
+        .to_string();
+    let mut aliases = vec![primary.clone()];
+    aliases.extend(
+        normalized
+            .split_once(" - ")
+            .map(|(prefix, _)| prefix.trim().to_string()),
+    );
+    let mut stripped = primary;
+    while let Some(prefix) = [
+        " holdings",
+        " holding",
+        " corporation",
+        " incorporated",
+        " limited",
+        " group",
+        " corp.",
+        " corp",
+        " inc.",
+        " inc",
+        " ltd.",
+        " ltd",
+    ]
+    .iter()
+    .find_map(|suffix| stripped.strip_suffix(suffix))
+    {
+        stripped = prefix.trim().to_string();
+        aliases.push(stripped.clone());
+    }
+    aliases.retain(|alias| valid_company_alias(alias));
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn damerau_levenshtein(left: &str, right: &str) -> usize {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut previous_previous = vec![0; right.len() + 1];
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_character) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_character) in right.iter().enumerate() {
+            let substitution_cost = usize::from(left_character != right_character);
+            current[right_index + 1] = (previous[right_index + 1] + 1)
+                .min(current[right_index] + 1)
+                .min(previous[right_index] + substitution_cost);
+            if left_index > 0
+                && right_index > 0
+                && left_character == &right[right_index - 1]
+                && left[left_index - 1] == *right_character
+            {
+                current[right_index + 1] =
+                    current[right_index + 1].min(previous_previous[right_index - 1] + 1);
+            }
+        }
+        std::mem::swap(&mut previous_previous, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
 pub(super) fn is_secondary_counter(name: &str) -> bool {
     let normalized = normalize_text(name);
     ["－ｒ", "-r", "－ｗｒ", "-wr"]
@@ -309,14 +403,29 @@ pub(super) fn is_secondary_counter(name: &str) -> bool {
 
 pub(super) fn is_derivative_or_fund(name: &str) -> bool {
     let normalized = normalize_text(name);
+    let is_etf = normalized
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| token == "etf" || token.ends_with("etf"));
     [
-        "购", "沽", "牛", "熊", "中银", "瑞银", "摩通", "法兴", "汇丰", "信证", "麦银", "etf",
-        "基金",
+        "购", "沽", "牛", "熊", "中银", "瑞银", "摩通", "法兴", "汇丰", "信证", "麦银", "基金",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
+        || is_etf
 }
 
 pub(super) fn contains_any(value: &str, candidates: &[&str]) -> bool {
     candidates.iter().any(|candidate| value.contains(candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fuzzy_company_name_score;
+
+    #[test]
+    fn fuzzy_company_names_allow_one_transposition_but_not_distant_guesses() {
+        assert!(fuzzy_company_name_score("netlfix", "Netflix, Inc. - Common Stock") > 0);
+        assert_eq!(fuzzy_company_name_score("netflix", "NetEase, Inc."), 0);
+        assert_eq!(fuzzy_company_name_score("hi", "Hillenbrand Inc."), 0);
+    }
 }

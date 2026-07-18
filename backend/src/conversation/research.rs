@@ -3,8 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -14,15 +13,22 @@ use crate::{
     time::now_iso,
 };
 
+mod cache;
 mod planner;
 mod public_sources;
 mod source_validation;
+#[cfg(test)]
+use cache::RESEARCH_CACHE_TTL;
+use cache::{load_cache, prune_expired_cache, query_hash};
 use planner::EvidenceCategory;
-pub(super) use planner::{plan_research, ResearchPlan};
+pub(super) use planner::{
+    community_request_requires_company_research, company_research_scope, plan_community_insights,
+    plan_community_research, plan_research, ResearchPlan,
+};
 use source_validation::{normalize_company_sources, normalize_sources, verify_source_urls};
 
-const RESEARCH_CACHE_TTL: chrono::Duration = chrono::Duration::hours(24);
 const PUBLIC_SOURCES_CACHE_VERSION: &str = "v6-evidence-quality";
+const COMMUNITY_INSIGHTS_CACHE_VERSION: &str = "v1";
 
 #[async_trait]
 pub trait WebResearchProvider: Send + Sync {
@@ -37,6 +43,18 @@ pub trait WebResearchProvider: Send + Sync {
         plan: &ResearchPlan,
         progress: mpsc::UnboundedSender<ResearchProgress>,
     ) -> Result<ResearchOutcome, ResearchError>;
+
+    async fn execute_community_insights(
+        &self,
+        plan: &ResearchPlan,
+        progress: mpsc::UnboundedSender<ResearchProgress>,
+    ) -> Result<ResearchOutcome, ResearchError> {
+        let mut outcome = self.execute(plan, progress).await?;
+        outcome
+            .sources
+            .retain(|source| source.source_tier == "community");
+        Ok(outcome)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,9 +155,41 @@ pub(super) async fn execute_with_cache(
     plan: &ResearchPlan,
     progress: mpsc::UnboundedSender<ResearchProgress>,
 ) -> AppResult<ResearchOutcome> {
+    execute_scoped_with_cache(pool, provider, plan, progress, ResearchScope::Company).await
+}
+
+pub(super) async fn execute_community_insights_with_cache(
+    pool: &SqlitePool,
+    provider: Arc<dyn WebResearchProvider>,
+    plan: &ResearchPlan,
+    progress: mpsc::UnboundedSender<ResearchProgress>,
+) -> AppResult<ResearchOutcome> {
+    execute_scoped_with_cache(
+        pool,
+        provider,
+        plan,
+        progress,
+        ResearchScope::CommunityInsights,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ResearchScope {
+    Company,
+    CommunityInsights,
+}
+
+async fn execute_scoped_with_cache(
+    pool: &SqlitePool,
+    provider: Arc<dyn WebResearchProvider>,
+    plan: &ResearchPlan,
+    progress: mpsc::UnboundedSender<ResearchProgress>,
+    scope: ResearchScope,
+) -> AppResult<ResearchOutcome> {
     let _ = progress.send(ResearchProgress::CheckingCache);
     prune_expired_cache(pool).await?;
-    let cache_key = format!("{}:{}", provider.name(), provider.cache_identity(plan));
+    let cache_key = research_cache_key(provider.as_ref(), plan, scope);
     let hash = query_hash(&cache_key);
     if let Some(cached) = load_cache(pool, &hash)
         .await?
@@ -153,10 +203,13 @@ pub(super) async fn execute_with_cache(
             "external research provider is not configured",
         ));
     }
-    let outcome = provider
-        .execute(plan, progress)
-        .await
-        .map_err(|error| AppError::bad_request(format!("external research failed: {error}")))?;
+    let outcome = match scope {
+        ResearchScope::Company => provider.execute(plan, progress).await,
+        ResearchScope::CommunityInsights => {
+            provider.execute_community_insights(plan, progress).await
+        }
+    }
+    .map_err(|error| AppError::bad_request(format!("external research failed: {error}")))?;
     let outcome = require_usable_sources(outcome)?;
     sqlx::query(
         r#"INSERT OR REPLACE INTO conversation_research_cache (
@@ -170,6 +223,21 @@ pub(super) async fn execute_with_cache(
     .execute(pool)
     .await?;
     Ok(outcome)
+}
+
+fn research_cache_key(
+    provider: &dyn WebResearchProvider,
+    plan: &ResearchPlan,
+    scope: ResearchScope,
+) -> String {
+    let identity = provider.cache_identity(plan);
+    match scope {
+        ResearchScope::Company => format!("{}:{identity}", provider.name()),
+        ResearchScope::CommunityInsights => format!(
+            "{}:community-insights-{COMMUNITY_INSIGHTS_CACHE_VERSION}:{identity}",
+            provider.name()
+        ),
+    }
 }
 
 fn require_usable_sources(outcome: ResearchOutcome) -> AppResult<ResearchOutcome> {
@@ -315,6 +383,29 @@ impl WebResearchProvider for PublicSourcesResearchProvider {
         let warning = incomplete_research_warning(&failed_categories);
         Ok(ResearchOutcome { sources, warning })
     }
+
+    async fn execute_community_insights(
+        &self,
+        plan: &ResearchPlan,
+        progress: mpsc::UnboundedSender<ResearchProgress>,
+    ) -> Result<ResearchOutcome, ResearchError> {
+        let _ = progress.send(ResearchProgress::SearchingCommunity);
+        let candidates = public_sources::community_discussions(&self.client, plan).await?;
+        let _ = progress.send(ResearchProgress::VerifyingSources);
+        let sources = verify_source_urls(normalize_company_sources(
+            candidates,
+            plan.company_name(),
+            plan.symbol(),
+        ))
+        .await
+        .into_iter()
+        .filter(|source| source.source_tier == "community")
+        .collect();
+        Ok(ResearchOutcome {
+            sources,
+            warning: None,
+        })
+    }
 }
 
 struct TavilyResearchProvider {
@@ -337,9 +428,32 @@ impl WebResearchProvider for TavilyResearchProvider {
         plan: &ResearchPlan,
         progress: mpsc::UnboundedSender<ResearchProgress>,
     ) -> Result<ResearchOutcome, ResearchError> {
+        self.execute_categories(plan, progress, None).await
+    }
+
+    async fn execute_community_insights(
+        &self,
+        plan: &ResearchPlan,
+        progress: mpsc::UnboundedSender<ResearchProgress>,
+    ) -> Result<ResearchOutcome, ResearchError> {
+        self.execute_categories(plan, progress, Some(EvidenceCategory::Community))
+            .await
+    }
+}
+
+impl TavilyResearchProvider {
+    async fn execute_categories(
+        &self,
+        plan: &ResearchPlan,
+        progress: mpsc::UnboundedSender<ResearchProgress>,
+        category: Option<EvidenceCategory>,
+    ) -> Result<ResearchOutcome, ResearchError> {
         let mut sources = Vec::new();
         let mut failed_categories = Vec::new();
         for planned_query in plan.queries() {
+            if category.is_some_and(|category| planned_query.category != category) {
+                continue;
+            }
             let stage = match planned_query.category {
                 EvidenceCategory::Official => ResearchProgress::SearchingOfficial,
                 EvidenceCategory::Independent => ResearchProgress::SearchingIndependent,
@@ -426,58 +540,15 @@ struct TavilyResult {
     content: String,
 }
 
-async fn load_cache(pool: &SqlitePool, hash: &str) -> AppResult<Option<ResearchOutcome>> {
-    let row = sqlx::query(
-        "SELECT results_json, fetched_at FROM conversation_research_cache WHERE query_hash = ?",
-    )
-    .bind(hash)
-    .fetch_optional(pool)
-    .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    let raw: String = row.try_get("results_json")?;
-    let outcome = serde_json::from_str::<ResearchOutcome>(&raw)?;
-    let fetched_at: String = row.try_get("fetched_at")?;
-    let fresh = chrono::DateTime::parse_from_rfc3339(&fetched_at)
-        .map(|fetched| {
-            chrono::Utc::now() - fetched.with_timezone(&chrono::Utc) < RESEARCH_CACHE_TTL
-        })
-        .unwrap_or(false);
-    if !fresh {
-        return Ok(None);
-    }
-    Ok(Some(outcome))
-}
-
-async fn prune_expired_cache(pool: &SqlitePool) -> AppResult<()> {
-    let cutoff = (chrono::Utc::now() - RESEARCH_CACHE_TTL).to_rfc3339();
-    sqlx::query(
-        r#"DELETE FROM conversation_research_cache
-        WHERE julianday(fetched_at) IS NULL OR julianday(fetched_at) < julianday(?)"#,
-    )
-    .bind(cutoff)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-fn query_hash(query: &str) -> String {
-    Sha256::digest(query.trim().as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use super::{
         incomplete_research_warning, plan_research, prune_expired_cache, require_usable_sources,
-        DisabledResearchProvider, EvidenceCategory, MisconfiguredResearchProvider,
-        PublicSourcesResearchProvider, ResearchError, TavilyResearchProvider, WebResearchProvider,
-        RESEARCH_CACHE_TTL,
+        research_cache_key, DisabledResearchProvider, EvidenceCategory,
+        MisconfiguredResearchProvider, PublicSourcesResearchProvider, ResearchError, ResearchScope,
+        TavilyResearchProvider, WebResearchProvider, RESEARCH_CACHE_TTL,
     };
     use crate::conversation::types::ThreadSubject;
 
@@ -515,6 +586,20 @@ mod tests {
             tavily.cache_identity(&earnings),
             tavily.cache_identity(&valuation)
         );
+    }
+
+    #[test]
+    fn community_insights_use_a_distinct_cache_scope() {
+        let plan = plan_research("PDD 社区看点", &pdd_subject()).expect("research plan");
+        let provider = PublicSourcesResearchProvider {
+            client: reqwest::Client::new(),
+        };
+
+        let company_key = research_cache_key(&provider, &plan, ResearchScope::Company);
+        let community_key = research_cache_key(&provider, &plan, ResearchScope::CommunityInsights);
+
+        assert_ne!(company_key, community_key);
+        assert!(community_key.contains("community-insights-v1"));
     }
 
     #[test]

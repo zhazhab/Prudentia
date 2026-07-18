@@ -25,28 +25,31 @@ import {
 import { api } from "../api/client";
 import { useConversationEvents } from "../api/useConversationEvents";
 import { ConversationActionCard } from "../components/ConversationActionCard";
+import { ConversationCapabilityArtifacts } from "../components/ConversationCapabilityArtifacts";
 import { ConversationContextPanel } from "../components/ConversationContextPanel";
 import { ConversationMessage } from "../components/ConversationMessage";
+import { ConversationRunPlan } from "../components/ConversationRunPlan";
 import { EmptyState } from "../components/EmptyState";
 import { useI18n } from "../i18n";
 import type {
   ConversationAction,
   ConversationAttachment,
   ConversationRun,
-  ConversationRunPhase,
   ConversationThreadSummary,
   MemoThreadMessage,
   RunEvent
 } from "../types/domain";
 import {
   chatHomeDefaultThreadId,
+  activeCapabilityCalls,
+  activeCapabilitySnapshot,
+  applyConversationRunEvent,
   formatThreadTime,
   type LiveConversationRun,
   mergeStoredActiveRun,
   mergeConversationMessages,
   memoChatElapsedSeconds,
   placeConversationActions,
-  parseTaskRouteReason,
   runActivityDescriptor,
   taskComplexityKey,
   taskRouteReasonKey,
@@ -436,6 +439,7 @@ export function HomePage() {
               return (
                 <Fragment key={message.id}>
                   <ConversationMessage message={message} onRetry={run && ["failed", "canceled", "interrupted"].includes(run.status) ? () => void retryRun(run.id) : undefined} />
+                  <ConversationCapabilityArtifacts artifacts={message.artifacts} />
                   {(actionPlacement.byMessageId[message.id] ?? []).map(renderActionCard)}
                 </Fragment>
               );
@@ -509,6 +513,7 @@ function RunStatus({ run, now, onRetry }: { run: LiveRun; now: number; onRetry: 
   const activity = runActivityDescriptor(run);
   const complexityKey = taskComplexityKey(run.task_complexity);
   const reasonKey = taskRouteReasonKey(run.route_reason);
+  const activeCapabilities = activeCapabilityCalls(run);
   const routeParts = [
     complexityKey ? t(complexityKey) : null,
     run.model ?? null,
@@ -531,11 +536,33 @@ function RunStatus({ run, now, onRetry }: { run: LiveRun; now: number; onRetry: 
               ? t("home.runCanceled")
               : run.status === "failed"
                 ? t("home.runFailed")
-                : t(activity.key, activity.params)}
+                : activeCapabilities.length > 1
+                  ? t("home.capabilitiesRunning", { count: activeCapabilities.length })
+                  : t(activity.key, activity.params)}
         </strong>
         <span>{routeParts.join(" · ")}</span>
+        {activeCapabilities.length ? (
+          <ul className="active-capability-list">
+            {activeCapabilities.map((capability) => {
+              const descriptor = runActivityDescriptor({
+                phase: capability.stage === "research" ? "researching" : "generating",
+                providerStage: capability.activity,
+                toolSubject: capability.subject,
+                nestedToolDisplayName: capability.nestedToolDisplayName,
+                agentTurn: capability.agentTurn,
+                agentTurnLimit: capability.agentTurnLimit
+              });
+              return (
+                <li key={capability.callId}>
+                  <span>{capability.displayName}</span>
+                  <em>{t(descriptor.key, descriptor.params)}</em>
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
+        {run.executionPlan ? <ConversationRunPlan plan={run.executionPlan} /> : null}
         {reasonKey && !terminal ? <em>{t(reasonKey)}</em> : null}
-        {run.error_message ? <em>{run.error_message}</em> : null}
       </div>
       {terminal ? <button type="button" onClick={onRetry} title={t("home.retry")}><RotateCcw size={15} /></button> : null}
     </div>
@@ -545,52 +572,28 @@ function RunStatus({ run, now, onRetry }: { run: LiveRun; now: number; onRetry: 
 function reduceRunEvent(current: Record<string, LiveRun>, event: RunEvent) {
   const existing = current[event.thread_id] ?? eventRun(event);
   if (!existing) return current;
-  const next: LiveRun = { ...existing };
-  if (event.event_type === "run.phase") {
-    next.status = "running";
-    next.phase = String(event.payload.phase ?? next.phase) as ConversationRunPhase;
-    next.provider = typeof event.payload.provider === "string" ? event.payload.provider : next.provider;
-    const detail = event.payload.detail && typeof event.payload.detail === "object"
-      ? event.payload.detail as Record<string, unknown>
-      : undefined;
-    next.providerStage = typeof event.payload.provider_stage === "string"
-      ? event.payload.provider_stage
-      : typeof detail?.activity === "string"
-        ? detail.activity
-        : next.providerStage;
-    next.sourceCount = typeof detail?.source_count === "number"
-      ? detail.source_count
-      : next.sourceCount;
-  } else if (event.event_type === "run.classified" || event.event_type === "run.routed") {
-    next.task_complexity = typeof event.payload.task_complexity === "string"
-      ? event.payload.task_complexity
-      : next.task_complexity;
-    next.route_reason = parseTaskRouteReason(event.payload.route_reason) ?? next.route_reason;
-    next.model = typeof event.payload.model === "string" ? event.payload.model : next.model;
-    next.provider = typeof event.payload.provider === "string"
-      ? event.payload.provider
-      : next.provider;
-  } else if (event.event_type === "message.delta") {
-    next.streamContent += String(event.payload.content ?? "");
-    next.messageId = typeof event.payload.message_id === "string" ? event.payload.message_id : next.messageId;
-  } else if (event.event_type === "message.completed") {
-    if (typeof event.payload.content === "string") next.streamContent = event.payload.content;
-    next.messageId = typeof event.payload.message_id === "string" ? event.payload.message_id : next.messageId;
-  } else if (event.event_type.startsWith("run.")) {
-    const status = event.event_type.slice(4);
-    if (["completed", "failed", "canceled", "interrupted"].includes(status)) {
-      next.status = status as ConversationRun["status"];
-      next.phase = status as ConversationRunPhase;
-      next.error_message = typeof event.payload.message === "string" ? event.payload.message : next.error_message;
-    }
-  }
-  next.updated_at = event.created_at;
+  const next = applyConversationRunEvent(existing, event);
   return { ...current, [event.thread_id]: next };
 }
 
 function eventRun(event: RunEvent): LiveRun | null {
   const run = event.payload.run;
-  return run && typeof run === "object" ? toLiveRun(run as unknown as ConversationRun) : null;
+  if (run && typeof run === "object") return toLiveRun(run as unknown as ConversationRun);
+  if (!event.event_type.startsWith("tool.") && !event.event_type.startsWith("run.plan.")) {
+    return null;
+  }
+  return {
+    id: event.run_id,
+    client_request_id: event.run_id,
+    thread_id: event.thread_id,
+    user_message_id: "",
+    status: "running",
+    phase: "generating",
+    started_at: event.created_at,
+    updated_at: event.created_at,
+    streamContent: "",
+    activeCapabilities: {}
+  };
 }
 
 function toLiveRun(run: ConversationRun): LiveRun {
@@ -598,7 +601,9 @@ function toLiveRun(run: ConversationRun): LiveRun {
     ...run,
     streamContent: "",
     providerStage: run.activity ?? undefined,
-    sourceCount: run.source_count ?? undefined
+    sourceCount: run.source_count ?? undefined,
+    activeCapabilities: activeCapabilitySnapshot(run.active_capabilities),
+    executionPlan: run.execution_plan ?? undefined
   };
 }
 

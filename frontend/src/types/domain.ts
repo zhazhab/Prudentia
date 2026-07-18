@@ -25,6 +25,116 @@ export interface MemoExtraction {
 export type MemoThreadMessageRole = "user" | "assistant" | "system";
 export type MemoThreadMessageStatus = "pending" | "streaming" | "completed" | "canceled" | "failed";
 
+export type ConversationCapabilityKind = "skill" | "agent";
+export type ConversationCapabilityStage = "analysis" | "challenge";
+
+export interface ConversationCapabilityFinding {
+  category: string;
+  title: string;
+  judgment: string;
+  claimType: "fact" | "inference" | "hypothesis" | string;
+  evidence: ConversationCapabilityEvidence[];
+  causalChain: string[];
+  counterargument: string;
+  unknowns: string[];
+  confidence: "low" | "medium" | "high" | string;
+  leadingIndicators: string[];
+  falsification: string;
+  decisionImpact: string;
+}
+
+export interface ConversationCapabilityEvidence {
+  claim: string;
+  sourceUrls: string[];
+  asOf: string;
+}
+
+export interface ConversationCapabilityEvidenceAssessment {
+  status: "sufficient" | "partial" | "insufficient" | string;
+  rationale: string;
+  latestEvidenceDate: string;
+  criticalGaps: string[];
+}
+
+export interface ConversationCapabilityArtifact {
+  call_id: string;
+  capability_id: string;
+  capability_version: number;
+  capability_kind: ConversationCapabilityKind;
+  display_name: string;
+  artifact_type: string;
+  status: "completed" | "failed";
+  subject_label?: string | null;
+  payload: Record<string, unknown>;
+  source_ids: string[];
+  warning?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  model_steps: Array<{ step: number; provider: string; model: string }>;
+  manifest_hash: string;
+  duration_ms: number;
+  execution_steps: number;
+  agent_trace?: AgentExecutionTrace[];
+}
+
+export interface AgentExecutionTrace {
+  turn: number;
+  action: "tool" | "final" | string;
+  tool_id?: string | null;
+  tool_version?: number | null;
+  tool_display_name?: string | null;
+  status: "completed" | "failed" | string;
+  source_count: number;
+  error_code?: string | null;
+}
+
+export interface ActiveCapabilityCall {
+  callId: string;
+  capabilityId: string;
+  capabilityKind: "native" | ConversationCapabilityKind;
+  displayName: string;
+  stage: "research" | ConversationCapabilityStage;
+  activity: string;
+  subject?: string;
+  stepIndex?: number;
+  stepTotal?: number;
+  nestedToolName?: string;
+  nestedToolDisplayName?: string;
+  agentTurn?: number;
+  agentTurnLimit?: number;
+}
+
+export interface ConversationActiveCapability {
+  call_id: string;
+  tool_name: string;
+  tool_version: number;
+  capability_kind: "native" | ConversationCapabilityKind;
+  display_name: string;
+  stage: "research" | ConversationCapabilityStage;
+  activity: string;
+  subject_label?: string | null;
+  step_index: number;
+  total_steps: number;
+  nested_tool_name?: string | null;
+  nested_tool_display_name?: string | null;
+  agent_turn?: number | null;
+  agent_turn_limit?: number | null;
+}
+
+export interface ConversationExecutionPlanStep {
+  id: string;
+  status: "pending" | "running" | "completed" | "skipped" | "failed" | string;
+}
+
+export interface ConversationExecutionPlan {
+  template_id: string;
+  scope: string;
+  dimensions: string[];
+  steps: ConversationExecutionPlanStep[];
+}
+
 export interface MemoThreadSummary {
   id: string;
   title: string;
@@ -121,6 +231,8 @@ export interface ConversationRun {
   started_at: string;
   updated_at: string;
   finished_at?: string | null;
+  active_capabilities?: ConversationActiveCapability[];
+  execution_plan?: ConversationExecutionPlan | null;
 }
 
 export interface RunEvent {

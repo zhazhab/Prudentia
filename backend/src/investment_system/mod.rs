@@ -17,8 +17,10 @@ use crate::{
 
 mod rule_graph;
 pub use rule_graph::{
-    activate_rule_graph, active_rule_graph, evaluate_active_rule_graph, legacy_system, RuleEdge,
-    RuleEvaluation, RuleGraph, RuleGraphPatch, RuleGraphVersion, RuleNode, RuleNodeAdapter,
+    activate_rule_graph, activate_rule_graph_with_adapters, active_rule_graph,
+    evaluate_active_rule_graph, evaluate_active_rule_graph_with_adapters, legacy_system,
+    validate_graph, RuleEdge, RuleEvaluation, RuleGraph, RuleGraphPatch, RuleGraphVersion,
+    RuleNode, RuleNodeAdapter, RuleNodeAdapterRegistry,
 };
 
 const DEFAULT_SYSTEM_ID: &str = "default";
@@ -57,7 +59,7 @@ async fn evaluate_rule_graph(
     State(state): State<AppState>,
     Json(input): Json<serde_json::Value>,
 ) -> AppResult<Json<RuleEvaluation>> {
-    Ok(Json(evaluate_active_rule_graph(&state.pool, input).await?))
+    Ok(Json(state.conversation.evaluate_rule_graph(input).await?))
 }
 
 async fn get_legacy_system(

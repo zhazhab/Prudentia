@@ -17,9 +17,11 @@ use crate::{
 
 mod actions;
 mod attachments;
+mod capabilities;
 mod company;
 mod context;
 mod engine;
+mod execution_plan;
 mod research;
 mod storage;
 mod subject_resolution;
@@ -104,6 +106,7 @@ pub fn routes() -> Router<AppState> {
         .route("/runs/active", get(active_runs))
         .route("/runs/{id}/cancel", post(cancel_run))
         .route("/runs/{id}/retry", post(retry_run))
+        .route("/capabilities", get(list_capabilities))
         .route("/threads", get(list_threads))
         .route("/threads/{id}", get(get_thread).delete(delete_thread))
         .route("/threads/{id}/archive", post(archive_thread))
@@ -135,6 +138,12 @@ async fn start_run(
 
 async fn active_runs(State(state): State<AppState>) -> AppResult<Json<Vec<ConversationRun>>> {
     Ok(Json(state.conversation.active_runs().await?))
+}
+
+async fn list_capabilities(
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<ConversationCapabilitySummary>>> {
+    Ok(Json(state.conversation.capabilities()))
 }
 
 async fn cancel_run(
@@ -292,13 +301,8 @@ async fn handle_event_socket(mut socket: WebSocket, state: AppState, mut cursor:
     if cursor > latest_event_id {
         cursor = 0;
     }
-    if let Ok(events) = state.conversation.replay_events(cursor).await {
-        for event in events {
-            cursor = event.event_id;
-            if !send_event(&mut socket, &event).await {
-                return;
-            }
-        }
+    if !replay_event_backlog(&mut socket, &state, &mut cursor).await {
+        return;
     }
     loop {
         tokio::select! {
@@ -314,13 +318,8 @@ async fn handle_event_socket(mut socket: WebSocket, state: AppState, mut cursor:
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if let Ok(events) = state.conversation.replay_events(cursor).await {
-                            for event in events {
-                                cursor = event.event_id;
-                                if !send_event(&mut socket, &event).await {
-                                    return;
-                                }
-                            }
+                        if !replay_event_backlog(&mut socket, &state, &mut cursor).await {
+                            return;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -336,6 +335,27 @@ async fn handle_event_socket(mut socket: WebSocket, state: AppState, mut cursor:
                     }
                     _ => {}
                 }
+            }
+        }
+    }
+}
+
+async fn replay_event_backlog(socket: &mut WebSocket, state: &AppState, cursor: &mut i64) -> bool {
+    loop {
+        let events = match state.conversation.replay_events(*cursor).await {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!(%error, event_cursor = *cursor, "conversation event replay failed");
+                return false;
+            }
+        };
+        if events.is_empty() {
+            return true;
+        }
+        for event in events {
+            *cursor = event.event_id;
+            if !send_event(socket, &event).await {
+                return false;
             }
         }
     }

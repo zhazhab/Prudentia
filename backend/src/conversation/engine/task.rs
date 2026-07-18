@@ -7,12 +7,12 @@ use crate::error::{AppError, AppResult};
 const GRACEFUL_CANCEL_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
-pub(super) struct TurnCancellation {
+pub(in crate::conversation) struct TurnCancellation {
     receiver: watch::Receiver<bool>,
 }
 
 impl TurnCancellation {
-    pub(super) fn ensure_active(&self) -> AppResult<()> {
+    pub(in crate::conversation) fn ensure_active(&self) -> AppResult<()> {
         if self.is_cancelled() {
             Err(AppError::internal("conversation run canceled"))
         } else {
@@ -20,16 +20,26 @@ impl TurnCancellation {
         }
     }
 
-    pub(super) fn is_cancelled(&self) -> bool {
+    pub(in crate::conversation) fn is_cancelled(&self) -> bool {
         *self.receiver.borrow()
     }
 
-    pub(super) async fn cancelled(&self) {
+    pub(in crate::conversation) async fn cancelled(&self) {
         let mut receiver = self.receiver.clone();
-        if *receiver.borrow() {
-            return;
+        loop {
+            if *receiver.borrow() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
         }
-        let _ = receiver.changed().await;
+    }
+
+    #[cfg(test)]
+    pub(in crate::conversation) fn active_for_test() -> Self {
+        let (_sender, receiver) = watch::channel(false);
+        Self { receiver }
     }
 }
 

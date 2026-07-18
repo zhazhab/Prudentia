@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub web_research_provider: WebResearchProviderKind,
     pub tavily_api_key: Option<String>,
     pub workspace_dir: PathBuf,
+    pub capability_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +155,7 @@ impl AppConfig {
             ),
             tavily_api_key: env::var("TAVILY_API_KEY").ok(),
             workspace_dir: paths.root_dir.join("data/workspace"),
+            capability_dir: paths.root_dir.join("capabilities"),
         }
     }
 }
