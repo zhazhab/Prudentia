@@ -9,21 +9,21 @@ import { useI18n, type TranslationKey } from "../i18n";
 import type { ConversationExecutionPlan, ConversationExecutionPlanStep } from "../types/domain";
 import {
   executionPlanDimensionKey,
+  executionPlanProgress,
   executionPlanScopeKey,
   executionPlanStepKey
 } from "../pages/homeRules";
 
 export function ConversationRunPlan({ plan }: { plan: ConversationExecutionPlan }) {
   const { t } = useI18n();
-  const countable = plan.steps.filter((step) => step.status !== "skipped");
-  const completed = countable.filter((step) => step.status === "completed").length;
+  const progress = executionPlanProgress(plan);
 
   return (
     <section className="conversation-run-plan" aria-label={t("home.planTitle")}>
       <header>
         <div>
           <strong>{t("home.planTitle")}</strong>
-          <span>{t("home.planProgress", { completed, total: countable.length })}</span>
+          <span>{t("home.planProgress", progress)}</span>
         </div>
         <p>
           <b>{t("home.planScopeLabel")}</b>

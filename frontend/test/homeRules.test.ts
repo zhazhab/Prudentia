@@ -8,6 +8,7 @@ import {
   constellationNodes,
   conversationCapabilityArtifacts,
   executionPlanDimensionKey,
+  executionPlanProgress,
   executionPlanScopeKey,
   executionPlanStepKey,
   mergeStoredActiveRun,
@@ -248,6 +249,19 @@ test("persisted run plan events expose scope, template, and live step status", (
   assert.equal(executionPlanScopeKey("moat"), "home.planScopeMoat");
   assert.equal(executionPlanDimensionKey("failure_mechanism"), "home.planDimensionFailure");
   assert.equal(executionPlanStepKey("research"), "home.planStepResearch");
+  assert.deepEqual(
+    executionPlanProgress({
+      template_id: "company_analysis_v1",
+      scope: "moat",
+      dimensions: [],
+      steps: [
+        { id: "scope", status: "completed" },
+        { id: "analysis", status: "failed" },
+        { id: "synthesis", status: "skipped" }
+      ]
+    }),
+    { completed: 1, total: 3 }
+  );
 });
 
 test("skill and agent lifecycle events restore parallel capability status", () => {

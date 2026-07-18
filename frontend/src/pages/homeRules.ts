@@ -325,6 +325,13 @@ export function executionPlanStepKey(step: string): TranslationKey {
   return executionPlanStepKeys[step] ?? "home.planStepUnknown";
 }
 
+export function executionPlanProgress(plan: ConversationExecutionPlan) {
+  return {
+    completed: plan.steps.filter((step) => step.status === "completed").length,
+    total: plan.steps.length
+  };
+}
+
 function stringValue(value: unknown) {
   return typeof value === "string" ? value : undefined;
 }
